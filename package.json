@@ -23,7 +23,7 @@
     "typecheck": "tsc --project packages/core/tsconfig.json --noEmit --composite false --incremental false",
     "test": "bun run yakumo vitest --import tsx",
     "test:core": "bun run test core",
-    "test:bun": "bun packages/core/tests/bun-smoke.ts && bun packages/core/tests/bun-activation.ts && bun packages/host-bun/tests/native.ts && bun packages/host-bun/tests/generations.ts && bun packages/host-bun/tests/normalization.ts && bun packages/host-bun/tests/resources.ts && bun packages/hmr/tests/bun-smoke.ts && bun packages/hmr/tests/bun-generations.ts && bun packages/hmr/tests/bun-rollback.ts",
+    "test:bun": "bun packages/core/tests/bun-smoke.ts && bun packages/core/tests/bun-activation.ts && bun packages/host-bun/tests/native.ts && bun packages/host-bun/tests/generations.ts && bun packages/host-bun/tests/normalization.ts && bun packages/host-bun/tests/resources.ts && bun packages/host-bun/tests/watchers.ts && bun packages/hmr/tests/bun-smoke.ts && bun packages/hmr/tests/bun-generations.ts && bun packages/hmr/tests/bun-rollback.ts",
     "test:bun:only": "bun packages/host-bun/tests/bun-only.ts",
     "test:text": "shx rm -rf coverage && bun run test --coverage --coverage.reporter text",
     "test:json": "shx rm -rf coverage && bun run test --coverage --coverage.reporter json",

@@ -99,6 +99,27 @@ describe('Include write', () => {
     expect((await app.read())[0].config.value).toBe(2)
   }, 10000)
 
+  it('keeps write failure visible across reads until a real save succeeds', async () => {
+    const app = await setup('tmp-write-error-state.yml', [plugin('a', 1)])
+    const before = await app.text()
+    renames.failures = 1
+    renames.code = 'ENOSPC'
+
+    await app.update('a', { config: { tag: 'a', value: 2 } })
+    await app.include().flush()
+    expect(app.include().writeError).toMatchObject({ code: 'ENOSPC' })
+    expect(await app.text()).toBe(before)
+
+    await app.include().refresh()
+    expect(app.include().readError).toBeUndefined()
+    expect(app.include().writeError).toMatchObject({ code: 'ENOSPC' })
+
+    await app.update('a', { config: { tag: 'a', value: 3 } })
+    await app.include().flush()
+    expect(app.include().writeError).toBeUndefined()
+    expect((await app.read())[0].config.value).toBe(3)
+  }, 10000)
+
   it('gives up after a bounded number of attempts and keeps the change', async () => {
     const app = await setup('tmp-write-bounded.yml', [plugin('a', 1)])
     const text = await app.text()

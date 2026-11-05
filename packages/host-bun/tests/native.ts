@@ -73,6 +73,50 @@ try {
     export default function second() { state.graphs.push(Bun.ModuleGraph.current) }
   `)
   const loader = createLoader()
+  // A late host import must keep native CommonJS and UTF-8 semantics after
+  // resident hooks are installed; copying the bytes into loader:js breaks it.
+  await put('late-common.cjs', "exports.greet = name => '你好，' + name\n")
+  await put('late-common-consumer.ts', `
+    import { greet } from './late-common.cjs'
+    export const greeting = greet('骰子')
+  `)
+  const lateCommon = await import(url('late-common-consumer.ts'))
+  assert.equal(lateCommon.greeting, '你好，骰子')
+  // An already evaluated dependency becomes an explicit root without reading
+  // edited disk source again; the current graph remains the cache authority.
+  await put('cached-child.ts', 'export const value = {}\n')
+  await put('cached-parent.ts', 'export { value } from "./cached-child.ts"\n')
+  const cachedLoader = createLoader()
+  const cachedParent = await cachedLoader.import(url('cached-parent.ts')) as { value: object }
+  await put('cached-child.ts', 'export const value = ;\n')
+  await put('cached-next-parent.ts', 'export { value } from "./cached-child.ts"\n')
+  const cachedNextParent = await cachedLoader.import(url('cached-next-parent.ts')) as { value: object }
+  assert.equal(cachedNextParent.value, cachedParent.value)
+  const cachedChild = await cachedLoader.import(url('cached-child.ts')) as { value: object }
+  assert.equal(cachedChild.value, cachedParent.value)
+  // Runtime module calls defer resolution and parsing until actually reached.
+  await put('broken-lazy.ts', 'export const value = ;\n')
+  await put('broken-lazy.cjs', 'exports.value = ;\n')
+  await put('lazy-parent.ts', `
+    export const loadLater = () => import('./created-later.ts')
+    export const loadBroken = () => import('./broken-lazy.ts')
+    export const loadCommonLater = () => require('./created-later.cjs')
+    export const resolveBroken = () => require.resolve('./broken-lazy.cjs')
+    export default function lazyParent() {}
+  `)
+  const lazyLoader = createLoader()
+  const lazyParent = await lazyLoader.import(url('lazy-parent.ts')) as {
+    loadLater(): Promise<{ value: string }>
+    loadBroken(): Promise<unknown>
+    loadCommonLater(): { value: string }
+    resolveBroken(): string
+  }
+  await put('created-later.ts', 'export const value = "created when used"\n')
+  await put('created-later.cjs', 'exports.value = "created CommonJS when used"\n')
+  assert.equal((await lazyLoader.current.unit.invoke(() => lazyParent.loadLater())).value, 'created when used')
+  await assert.rejects(() => lazyLoader.current.unit.invoke(() => lazyParent.loadBroken()))
+  assert.equal(lazyLoader.current.unit.invoke(() => lazyParent.loadCommonLater()).value, 'created CommonJS when used')
+  assert.equal(lazyLoader.current.unit.invoke(() => lazyParent.resolveBroken()), fileURLToPath(url('broken-lazy.cjs')))
   const first = await loader.import(url('first.ts')) as Record<string, unknown>
   const second = await loader.import(url('second.ts')) as Record<string, unknown>
   const definition = first.default

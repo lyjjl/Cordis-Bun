@@ -34,6 +34,24 @@ describe('Include sync', () => {
     expect((await app.read())[0].config.value).toBe(2)
   }, 10000)
 
+  it('retains a rejected file schema update in current entry errors until recovery', async () => {
+    const options = (port: unknown) => [{ id: 'a', name: './schema-plugin', config: { tag: 'a', port } }]
+    const app = await setup('tmp-sync-schema-error.yml', options(80))
+    expect(app.config('a').port).toBe(80)
+
+    await writeFile(app.filename, yaml.stringify(options('invalid')))
+    await app.include().refresh()
+    await app.include().await()
+    expect(app.config('a').port).toBe(80)
+    expect(app.include().store['a']!.errors).toEqual([expect.objectContaining({ name: 'ValidationError' })])
+
+    await writeFile(app.filename, yaml.stringify(options(81)))
+    await app.include().refresh()
+    await app.include().await()
+    expect(app.config('a').port).toBe(81)
+    expect(app.include().store['a']!.errors).toEqual([])
+  }, 10000)
+
   it('does not write back when the file removes an entry', async () => {
     const before = '# keep me\n' + yaml.stringify([plugin('a', 1), plugin('b', 1)])
     const app = await setup('tmp-sync-remove.yml', before)

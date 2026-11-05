@@ -1,5 +1,5 @@
-import { Context } from 'cordis'
-import { Awaitable } from 'cosmokit'
+import type { AsyncDisposable, Context, ResourceScope } from 'cordis'
+import type { Awaitable } from 'cosmokit'
 import { watch } from 'chokidar'
 import { statSync } from 'node:fs'
 import { dirname, posix, relative, resolve, sep } from 'node:path'
@@ -93,13 +93,16 @@ interface Hook<F> {
 type Hooks = { [K in keyof WatchEvents]: Set<Hook<WatchEvents[K]>> }
 
 export class Watcher {
-  /** Ends the watch. The watch also ends with the calling fiber. */
-  public dispose: () => Promise<void>
+  /** Call to end the watch; await the handle itself to join its initialization. */
+  public dispose: AsyncDisposable<Promise<void>>
 
   private _hooks: Hooks = { change: new Set(), ready: new Set(), error: new Set() }
   private _ready = false
+  private readonly _resources: ResourceScope
 
   constructor(private ctx: Context, filename: string, options: WatchOptions) {
+    // Service shadows keep provider resources; admission belongs to this calling activation.
+    this._resources = ctx.fiber.ctx.resources
     // A file replaced through a rename, as by an atomic write, is lost by a
     // watch on the file itself, so its directory is watched instead.
     const isFile = !statSync(filename, { throwIfNoEntry: false })?.isDirectory()
@@ -166,17 +169,24 @@ export class Watcher {
     }
   }
 
+  private _invoke(execute: () => Awaitable<void>, onError: (error: unknown) => void) {
+    if (!this._resources.active) return
+    this.ctx.task(async () => {
+      try { await execute() } catch (error) { onError(error) }
+    }, 'ctx.fs.watch() callback')
+  }
+
   private _call(listener: (...args: any[]) => Awaitable<void>, args: any[]) {
-    (async () => listener(...args))().catch(error => this._error(error))
+    this._invoke(() => listener(...args), error => this._error(error))
   }
 
   private _error(error: unknown) {
     const hooks = this._hooks.error
-    if (!hooks.size) return this.ctx.logger.warn(error)
+    if (!this._resources.active || !hooks.size) return this.ctx.logger.warn(error)
     for (const hook of [...hooks]) {
       if (hook.removed) continue
       // An error of an error listener is not reported to the error listeners again.
-      (async () => hook.listener(error))().catch(error => this.ctx.logger.warn(error))
+      this._invoke(() => hook.listener(error), error => this.ctx.logger.warn(error))
     }
   }
 }

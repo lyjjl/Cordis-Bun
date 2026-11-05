@@ -131,6 +131,24 @@ describe('Include reload', () => {
     expect(app.ctx.bail('test/get-value')).to.equal('default')
   }, 10000)
 
+  it('exposes the current read failure and clears it when the last valid bytes return', async () => {
+    const app = await setup('tmp-reload-read-error.yml', INNER)
+    await waitFor(() => app.ctx.bail('test/get-value'))
+    const include = app.include()
+
+    await writeFile(app.filename, UNPARSABLE)
+    await include.refresh()
+    expect(include.readError).toMatchObject({ name: 'ConfigFileError', stage: 'parse' })
+    expect(app.ctx.bail('test/get-value')).to.equal('default')
+
+    // This is exactly the cached content: a successful unchanged read must
+    // clear the issue too, without requiring a new tree generation.
+    await writeFile(app.filename, INNER)
+    await include.refresh()
+    expect(include.readError).toBeUndefined()
+    expect(app.ctx.bail('test/get-value')).to.equal('default')
+  }, 10000)
+
   it('never overwrites an existing but unparsable file with initial', async () => {
     const app = await setup('tmp-reload-initial.yml', UNPARSABLE, {
       initial: [

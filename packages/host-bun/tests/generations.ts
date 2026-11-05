@@ -293,7 +293,7 @@ async function nestedResidentAliases() {
   await writeFile(join(packageDirectory, 'package.json'), JSON.stringify({
     name, type: 'module', exports: { '.': './index.js', './sub': './sub.js' },
   }))
-  await writeFile(join(packageDirectory, 'index.js'), 'export const shared = { count: 100 }\n')
+  await writeFile(join(packageDirectory, 'index.js'), 'export const diskOnly = { count: 100 }\n')
   await writeFile(subpath, 'export const sub = { version: "old" }\n')
   await writeFile(join(nested, 'package.json'), JSON.stringify({
     type: 'module', imports: { '#shared': name },
@@ -309,9 +309,9 @@ async function nestedResidentAliases() {
   await writeFile(join(nested, 'view.tsx'), 'const count: number = 3; export const view = <widget count={count} />\n')
   await writeFile(join(fixture, 'data.json'), '{"answer":42}\n')
   await writeFile(join(fixture, 'root.ts'), `
-export { shared as importsShared, sub } from './nested/imports.ts'
-export { shared as pathsShared } from './nested/paths.ts'
-export { view } from './nested/view.tsx'
+export { shared as importsShared, sub } from './nested/imports'
+export { shared as pathsShared } from './nested/paths'
+export { view } from './nested/view'
 import payload from './data.json'
 export const answer: number = payload.answer
 export default function app() {}

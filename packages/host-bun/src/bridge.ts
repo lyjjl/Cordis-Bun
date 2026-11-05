@@ -1,8 +1,7 @@
-import { readFile } from 'node:fs/promises'
 import { createRequire, isBuiltin } from 'node:module'
 import { dirname, extname, isAbsolute, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { ModuleGraph, type OnLoadResult, plugin, resolveSync } from 'bun'
+import { ModuleGraph, plugin, resolveSync } from 'bun'
 import * as cordis from 'cordis'
 import * as loader from '@cordisjs/plugin-loader'
 import * as host from './index.ts'
@@ -38,6 +37,8 @@ export function resolveModule(specifier: string, parentURL?: string): string {
   const parent = parentURL?.startsWith('file:') ? fileURLToPath(parentURL) : parentURL
   const base = parent ? parentURL!.endsWith('/') ? parent : dirname(parent) : process.cwd()
   const path = specifier.startsWith('file:') ? fileURLToPath(specifier) : specifier
+  const resolving = resolvingNative
+  resolvingNative = true
   try {
     const resolved = resolveSync(path, base)
     return fileURL(resolved) ?? resolved
@@ -46,6 +47,8 @@ export function resolveModule(specifier: string, parentURL?: string): string {
     // Bare requests keep their original parent in the loader until resolution.
     if (isAbsolute(path) || path.startsWith('.')) return pathToFileURL(resolve(base, path)).href
     throw error
+  } finally {
+    resolvingNative = resolving
   }
 }
 
@@ -86,6 +89,7 @@ const registered = new Map<string, Resident>()
 const residentFiles = new Set<string>([bootstrapURL])
 const hostCache = createRequire(import.meta.url).cache
 let registration = 0
+let resolvingNative = false
 
 function assertResident(specifier: string, previous: Resident, namespace: Record<string, unknown>): void {
   const keys = Object.keys(namespace)
@@ -102,15 +106,17 @@ function installResidents(additions: ReadonlyMap<string, Resident>): void {
     name: `cordis-host-residents-${++registration}`,
     setup(builder) {
       if (installImporter) {
-        // Runtime aliases can be normalized before onResolve. Register against
-        // each actual source importer before Bun parses its transitive imports.
-        // Source-result promises must stay in Bun's native loader context.
-        builder.onLoad({ filter: /^(?:\/|[A-Za-z]:[\\/]).*\.(?:[cm]?[jt]s|[jt]sx)$/, namespace: 'file' }, async (args): Promise<OnLoadResult> => {
-          const url = fileURL(args.path)!
-          registerResidentFiles(url)
-          const resident = registered.get(url)
-          if (resident) return { loader: 'object', exports: resident.namespace }
-          return { contents: await readFile(args.path), loader: sourceLoader(args.path)! }
+        // Observe resolution without replacing ordinary source: runtime onLoad
+        // in Bun 1.4.4 loses CommonJS format and cannot fall through.
+        builder.onResolve({ filter: /.*/, namespace: 'file' }, (args) => {
+          if (resolvingNative) return
+          const parent = fileURL(args.importer)
+          if (parent && sourceLoader(args.importer)) registerResidentFiles(parent)
+          let url = fileURL(args.path)
+          if (!url && parent && sourceLoader(args.path)) url = fileURL(resolveModule(args.path, parent))
+          if (!url) return
+          if (!registered.has(url) && sourceLoader(fileURLToPath(url))) registerResidentFiles(url)
+          if (registered.has(url)) return { path: fileURLToPath(url), namespace: 'file' }
         })
       }
       for (const [specifier, resident] of additions) {
@@ -127,23 +133,29 @@ function installResidents(additions: ReadonlyMap<string, Resident>): void {
 
 /** Register the same object module under Bun's canonical, importer-resolved path. */
 export function registerResidentFiles(parentURL: string): void {
-  runInHost(() => {
-    const additions = new Map<string, Resident>()
-    for (const [specifier, resident] of registered) {
-      if (specifier.startsWith('file:')) continue
-      let url: string | undefined
-      try {
-        url = fileURL(resolveModule(specifier, parentURL))
-      } catch {
-        // A virtual resident, or a package unavailable from this importer.
+  if (resolvingNative) return
+  resolvingNative = true
+  try {
+    runInHost(() => {
+      const additions = new Map<string, Resident>()
+      for (const [specifier, resident] of registered) {
+        if (specifier.startsWith('file:')) continue
+        let url: string | undefined
+        try {
+          url = fileURL(resolveModule(specifier, parentURL))
+        } catch {
+          // A virtual resident, or a package unavailable from this importer.
+        }
+        if (!url) continue
+        const previous = registered.get(url) ?? additions.get(url)
+        if (previous) assertResident(url, previous, resident.namespace)
+        else additions.set(url, resident)
       }
-      if (!url) continue
-      const previous = registered.get(url) ?? additions.get(url)
-      if (previous) assertResident(url, previous, resident.namespace)
-      else additions.set(url, resident)
-    }
-    installResidents(additions)
-  })
+      installResidents(additions)
+    })
+  } finally {
+    resolvingNative = false
+  }
 }
 
 export function collectResidentFiles(): Set<string> {

@@ -96,6 +96,30 @@ export abstract class EntryTree {
     }
   }
 
+  /** Current source rejections and registered-entry failures in live groups. */
+  get errors(): unknown[] {
+    const owner = this.root.ctx
+    if (!owner.resources.active || !owner.fiber.accepting) return []
+    const errors = new Set<unknown>(this.root.errors)
+    for (const entry of Object.values(this.store)) {
+      // An entry's own failed activation is still a current failure. It is
+      // the owning group's activation, not that failed child, that must live.
+      const parent = entry.parent.ctx
+      if (!parent.resources.active || !parent.fiber.accepting) continue
+      for (const error of entry.errors) errors.add(error)
+      const group = entry.subgroup
+      // A Loader service getter may run through a contextual proxy. Its root
+      // group, unlike that receiver, is the stable canonical tree identity.
+      if (group?.tree.root === this.root && group.ctx.resources.active && group.ctx.fiber.accepting) {
+        for (const error of group.errors) errors.add(error)
+      }
+      if (entry.subtree) {
+        for (const error of entry.subtree.errors) errors.add(error)
+      }
+    }
+    return [...errors]
+  }
+
   getTasks() {
     return [
       ...this._disposals,

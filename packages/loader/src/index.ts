@@ -203,10 +203,6 @@ export class Loader extends EntryTree {
     }
   }
 
-  get errors() {
-    return [...new Set([...this.entries()].flatMap(entry => entry.errors))]
-  }
-
   unwrapExports(exports: unknown): Plugin {
     return this.moduleSource
       ? this.moduleSource.unwrapExports(exports)

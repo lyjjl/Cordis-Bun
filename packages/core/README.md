@@ -39,7 +39,7 @@ bun run lint
 
 - `typecheck` 检查内核源码。
 - `test:core` 运行内核回归测试，包含上游依赖、隔离、事件和配置更新语义。
-- `test:bun` 运行真实 Bun 内核、ModuleGraph 与 HMR 场景，覆盖构造失败的代码引用回收、HTTP、定时器、SDK/别名身份、旧代导入、严格租约、候选诊断与依赖消费者恢复。
+- `test:bun` 运行十个真实 Bun 内核、ModuleGraph 与 HMR 场景，覆盖构造失败的代码引用回收、HTTP、定时器、文件监听回调排空/退休接纳、SDK/别名身份、旧代导入、严格租约、候选诊断与依赖消费者恢复。
 - `test:bun:only` 在 Linux bubblewrap 中复制源码、隔离原工作区并屏蔽宿主 Node；完成锁定安装、正式入口启动、HTTP、配置刷新、同进程代码热更新、信号收尾和启动诊断验收。该开发验收命令使用 bubblewrap；正式运行使用 Bun。
 - CI 的 `bun-runtime` 作业在 `oven/bun:1.4.4` 镜像中执行同一套源码验收。Bun 运行时及 `bun run` 创建的 `node` 兼容别名通过文件设备号与 inode 核对为 Bun 自身。
 - `test` 运行完整工作区测试。Node Loader/HMR 作为开发与对照后端，Yakumo 提供工作区源码解析。
@@ -203,6 +203,13 @@ ctx.on('maintenance', async () => {
 
 独立后台工作直接启动 `ctx.task()`，各自保留收尾责任。异步上下文用于定位当前执行记录；等待图仅采用已声明的依赖边。因此，同一实例内由某项工作发起的自停，会等待仍独立执行的其他工作。生命周期完成值与任务结果均保留实际完成和异常信息。
 
+### 文件监听
+
+`ctx.fs.watch(path)` 把监听与异步回调归调用方的固定激活所有，而非 Fs 提供者或该 Fiber 后续的新激活。退休停止新回调接纳，已接纳的回调及错误处理通过原生 task 完成后才回收资源和代码；退休后不能再接纳错误监听器时，原错误进入现有 warning 通道。
+
+`watcher.dispose()` 结束监听；`await ctx.join(watcher.dispose)` 则只等待监听真正初始化，不会关闭它。这是原生 `AsyncDisposable<Promise<void>>`：可调用的清理句柄本身具有初始化 thenable。Include 的 watch helper 使用这份实际完成值，不另设 ready 标志或等待队列。
+
+
 ### 配置目标收敛
 
 | 观察项 | 含义 |
@@ -213,6 +220,8 @@ ctx.on('maintenance', async () => {
 | `fiber.lastError` | 当前记录的激活、原地更新或资源清理异常 |
 
 连续更新按最新目标收敛，允许跳过中间配置。过期初始化进入清理路径；生效配置仅由对应目标发布。原地更新同样校验目标序号，晚到的旧更新保留新目标的生效状态。
+
+Schema 校验在目标接纳前同步运行，拒绝时不覆盖有效实例。Loader 的 `Entry.errors` 仍保留当前文件/原地更新的拒绝，直到新尝试、成功恢复或撤销该目标；旧请求晚到的失败不会覆盖新目标的诊断。条目创建前的 `EntryOptions` 拒绝由当前 `EntryGroup.errors` 保留，`EntryTree.errors` 汇总仍存活的组、子树和条目错误，不重放已替换组的旧拒绝。Include 的 `readError` 与 `writeError` 分别记录当前读写问题，对应成功 I/O 清除；解析失败保留旧树和原文件，写入失败保留原生 journal 以供后续重试。`fiber.lastError` 可保留已报告的清理历史，不能仅凭它判断当前目标失败。
 
 ### 原生诊断
 
@@ -232,7 +241,9 @@ ctx.on('maintenance', async () => {
 
 同一应用的可重载插件集合共用一张 ModuleGraph，保留直接导入的共同模块身份；一次代码更新停换整组。默认基础设施插件使用常驻 ESM 实例。宿主通过命名对象模块共享 `cordis`、Loader、host-bun 与常驻插件，插件使用命名 SDK 入口和传入的 Context。
 
-显式 npm resident 在实际 JS/TS 导入者的原生加载边界解析并登记规范入口，因此包 `#imports` 与 TypeScript paths 指向同一入口时仍共享宿主 namespace 和对象。登记只覆盖匹配入口，不会把全包子路径自动设为 resident；普通本地模块继续参与分组代码换代。对象模块登记是进程常驻的，同名或同规范文件的登记共享同一 namespace；已经创建的宿主也能识别随后登记的 resident。
+显式 npm resident 通过 Bun 自身准备出的静态文件闭包和 runtime `onResolve` 可观察的请求登记规范入口，因此已登记导入者的包 `#imports` 与 TypeScript paths 指向同一入口时仍共享宿主 namespace 和对象。首次未缓存根导入与 HMR 准备复用该静态准备；初始准备以当前图的原生缓存元数据为权威，既有依赖不重新读取磁盘，HMR 准备则重新读取新代静态闭包。`import()`、`require()` 和 `require.resolve()` 的解析与加载保留各自运行时调用语义。普通源码保持 Bun 原生 CommonJS、ESM 与 UTF-8 加载流程，不通过全局 `onLoad` 改写。登记只覆盖匹配入口，不会把全包子路径自动设为 resident；普通本地模块继续参与分组代码换代。对象模块登记是进程常驻的，同名或同规范文件的登记共享同一 namespace；已经创建的宿主也能识别随后登记的 resident。
+
+Bun 1.4.4 没有覆盖所有无扩展名请求的 pre-evaluation importer hook。未遍历的动态目标或 external package 若又通过 runtime 不可观察的请求进入私有 SDK alias，不能保证该 alias 自动绑定宿主 namespace；稳定共享身份应使用显式 resident 名称或已登记的 canonical 入口。其余模块加载继续遵循 Bun 原生行为，不宣称所有动态导入都有静态闭包覆盖。
 
 进程保留一张常驻协调图，承载宿主完成值和执行上下文切换；应用代码图按代释放。`AsyncLocalStorage` 数据穿过图调用与宿主协调边界继续保持原归属。[ModuleGraph](https://bun.sh/docs/runtime/module-graph) 使用 Bun 的实验性 API，运行基线为 `1.4.4`，升级验收使用上述原生与隔离场景。
 

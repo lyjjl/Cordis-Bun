@@ -63,7 +63,8 @@ export function resolveConfig(runtime: Plugin.Runtime, config: any) {
   }
 }
 
-interface AsyncDisposable<T extends Awaitable<void> = Awaitable<void>> extends PromiseLike<() => T> {
+/** Callable cleanup whose thenable waits for the effect's actual initialization. */
+export interface AsyncDisposable<T extends Awaitable<void> = Awaitable<void>> extends PromiseLike<() => T> {
   (): T
 }
 

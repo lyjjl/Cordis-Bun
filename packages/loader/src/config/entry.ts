@@ -1,5 +1,6 @@
 import { Context, Fiber, FiberState, Inject, Plugin, ValidationError } from 'cordis'
 import { deepEqual, Dict, isNullable } from 'cosmokit'
+import type { Awaitable } from 'cosmokit'
 import { Loader } from '../index.ts'
 import { EntryGroup } from './group.ts'
 import { EntryTree, ModuleNotFoundError } from './tree.ts'
@@ -90,7 +91,9 @@ export class Entry {
   get errors() {
     const errors = [...this._errors.values()]
     for (const fiber of [this.outerFiber, this.innerFiber]) {
-      if (fiber?.state === FiberState.FAILED) errors.push(fiber.lastError)
+      if (fiber?.state !== FiberState.FAILED) continue
+      const error = fiber.lastError
+      if (!errors.includes(error)) errors.push(error)
     }
     return errors
   }
@@ -220,11 +223,29 @@ export class Entry {
     }
     this._resolveDisabled(ctx)
     if (this.disabled || !this._applyIntercept(ctx)) {
+      this._errors.delete('activation')
       await this._dispose(this.innerFiber)
       return
     }
     if (diff.includes('config') || this.options.group) {
-      await this.innerFiber!.update(this.options.config, true)
+      const fiber = this.innerFiber
+      const config = this.options.config
+      this._errors.delete('activation')
+      let updating: Awaitable<void>
+      try {
+        updating = fiber.update(config, true)
+      } catch (error) {
+        updating = Promise.reject(error)
+      }
+      const revision = fiber.revision
+      try {
+        await updating
+      } catch (error) {
+        if (this.innerFiber === fiber && this.options.config === config && fiber.revision === revision) {
+          this._errors.set('activation', error)
+        }
+        throw error
+      }
     }
   }
 

@@ -1,8 +1,10 @@
 import { Context, Fiber, Service } from 'cordis'
 import Loader from '@cordisjs/plugin-loader'
 import Fs from '@cordisjs/plugin-fs-node'
+import type { WatchOptions } from '@cordisjs/plugin-fs-node'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFile, rm, writeFile } from 'node:fs/promises'
+import { pathToFileURL } from 'node:url'
 import * as yaml from 'yaml'
 import Include from '../src/index.ts'
 import { fixture, plugin } from './utils.ts'
@@ -71,6 +73,55 @@ describe('Include watch with fs', () => {
     fiber = undefined
     await rm(filename, { force: true })
   })
+
+  it('joins the actual watcher effect initialization before its helper fiber settles', async () => {
+    const entered = Promise.withResolvers<void>()
+    const gate = Promise.withResolvers<void>()
+    class GatedFs extends Fs {
+      override watch(path: string | URL, options: WatchOptions = {}) {
+        const caller = this.ctx
+        const view = Object.create(this) as this
+        Object.defineProperty(view, 'ctx', { value: caller.extend({
+          effect(execute: () => Promise<() => Promise<void>>, label: string) {
+            return caller.effect(async () => {
+              const dispose = await execute()
+              entered.resolve()
+              await gate.promise
+              return dispose
+            }, label)
+          },
+        }) })
+        return super.watch.call(view, path, options)
+      }
+    }
+
+    await writeFile(filename, '[]\n')
+    const ctx = new Context()
+    await ctx.plugin(GatedFs)
+    fiber = await ctx.plugin(Loader, { baseUrl: import.meta.url })
+    const include = ctx.plugin(Include, { path: pathToFileURL(filename).href, watch: true }).ctx.fiber
+    try {
+      await include.await()
+      await entered.promise
+      const owned = new Set<Fiber>()
+      include._collectAffectedFibers(owned, false)
+      let ready = false
+      const settling = Promise.all([...owned].map(fiber => fiber.await())).then(() => { ready = true })
+      // The platform watcher is initialized, but its actual effect receipt is
+      // gated. An event-loop turn drains every ungated completion without a
+      // guessed wall-clock delay.
+      const turn = Promise.withResolvers<void>()
+      setImmediate(turn.resolve)
+      await turn.promise
+      expect(ready).toBe(false)
+      gate.resolve()
+      await settling
+      expect(ready).toBe(true)
+    } finally {
+      gate.resolve()
+      await include.dispose()
+    }
+  }, 10000)
 
   it('keeps watching the file across its own rename-based writes', async () => {
     await writeFile(filename, yaml.stringify([plugin('a', 0)]))

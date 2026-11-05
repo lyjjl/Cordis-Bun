@@ -6,7 +6,7 @@ import type { ModuleSource } from '@cordisjs/plugin-loader'
 import { unwrapExports as unwrapModule } from '@cordisjs/loader-utils'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { readFile } from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   abortedImport, collectResidentFiles, fileURL, registerResidentFiles, registerResidents, type Resident, resolveModule, runInHost, sourceLoader,
 } from './bridge.ts'
@@ -126,6 +126,12 @@ export class BunModuleLoader implements ModuleSource {
         const generation = this._current
         let namespace: unknown
         try {
+          const cachedFiles = generation.plugins.has(url) ? undefined : generation.unit.files()
+          if (cachedFiles && !cachedFiles.has(url)) {
+            await this._prepareSources([url], cachedFiles)
+            this._assertOpen()
+            if (generation !== this._current) continue
+          }
           namespace = await generation.unit.import(url)
         } catch (error) {
           for (let gate = this._publicationGate(); gate; gate = this._publicationGate()) await gate.promise
@@ -172,25 +178,59 @@ export class BunModuleLoader implements ModuleSource {
     return runInHost(async () => {
       this._assertOpen()
       const roots = this._resolveRoots()
-      // Build follows the candidate roots' current static closure. Files loaded
-      // only by the previous graph may have been removed by this source edit.
-      if (roots.size) {
-        const result = await build({
-          entrypoints: [...roots].map(url => fileURLToPath(url)),
-          target: 'bun',
-          format: 'esm',
-          packages: 'external',
-          external: [
-            ...[...this._residents.keys()].filter(specifier => !specifier.startsWith('file:')),
-            ...[...this._residentFiles].map(url => fileURLToPath(url)),
-          ],
-          throw: false,
-        })
-        if (!result.success) throw new AggregateError(result.logs, 'Bun candidate source preparation')
-      }
+      await this._prepareSources([...roots])
       this._assertOpen()
       return [...roots]
     })
+  }
+
+  private async _prepareSources(roots: readonly string[], cachedFiles?: ReadonlySet<string>): Promise<void> {
+    if (!roots.length) return
+    // Use Bun's own static closure, including extensionless imports. Runtime
+    // hooks cannot observe those requests and must not replace ordinary source.
+    const result = await build({
+      entrypoints: roots.map(url => fileURLToPath(url)),
+      target: 'bun',
+      format: 'esm',
+      packages: 'external',
+      external: [
+        ...[...this._residents.keys()].filter(specifier => !specifier.startsWith('file:')),
+        ...[...this._residentFiles].map(url => fileURLToPath(url)),
+      ],
+      plugins: [{
+        name: 'cordis-resident-importers',
+        setup: (builder) => {
+          builder.onResolve({ filter: /.*/ }, (args) => {
+            // Metadata preparation must not resolve or parse modules before
+            // native evaluation reaches import(), require() or require.resolve().
+            switch (args.kind) {
+              case 'dynamic-import':
+              case 'require-call':
+              case 'require-resolve':
+                return { path: args.path, external: true }
+            }
+            if (this._residents.has(args.path)) return { path: args.path, external: true }
+            const parent = args.importer ? pathToFileURL(args.importer).href : undefined
+            if (parent) registerResidentFiles(parent)
+            let url: string
+            try {
+              url = resolveModule(args.path, parent)
+            } catch {
+              // Let Bun report its own unresolved import with source location.
+              return
+            }
+            if (this._isResident(url) || cachedFiles?.has(url)) {
+              return { path: url.startsWith('file:') ? fileURLToPath(url) : url, external: true }
+            }
+          })
+          builder.onLoad({ filter: /\.(?:[cm]?[jt]s|[jt]sx)$/ }, (args) => {
+            registerResidentFiles(pathToFileURL(args.path).href)
+          })
+        },
+      }],
+      throw: false,
+    })
+    if (!result.success) throw new AggregateError(result.logs, 'Bun source preparation')
   }
 
   loadGeneration(): Promise<ModuleGeneration> {

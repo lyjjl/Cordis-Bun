@@ -64,4 +64,83 @@ describe('Loader: current bootstrap diagnostics', () => {
       await ctx.fiber.dispose()
     }
   })
+
+  it('retain a rejected in-place target until a healthy update replaces it', async () => {
+    const { ctx, loader } = await setup()
+    const failure = new Error('configuration update rejected')
+    let accepted = 1
+    loader.modules.app = {
+      apply(ctx: Context) {
+        ctx.on('internal/update', (config: number) => {
+          if (config === 2) throw failure
+          accepted = config
+        })
+      },
+    }
+    try {
+      await loader.read([{ id: 'app', name: 'app', config: 1 }])
+      await expect(loader.update('app', { config: 2 })).rejects.toBe(failure)
+      expect(loader.errors).toEqual([failure])
+      expect(accepted).toBe(1)
+      await loader.update('app', { config: 3 })
+      expect(accepted).toBe(3)
+      expect(loader.errors).toEqual([])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('ignore an obsolete target rejection after a newer update succeeded', async () => {
+    const { ctx, loader } = await setup()
+    const failure = new Error('obsolete configuration update')
+    const entered = Promise.withResolvers<void>()
+    const finish = Promise.withResolvers<void>()
+    let accepted = 1
+    loader.modules.app = {
+      apply(ctx: Context) {
+        ctx.on('internal/update', async (config: number) => {
+          if (config === 2) {
+            entered.resolve()
+            await finish.promise
+            throw failure
+          }
+          accepted = config
+        })
+      },
+    }
+    try {
+      await loader.read([{ id: 'app', name: 'app', config: 1 }])
+      const older = loader.update('app', { config: 2 }).then(() => undefined, error => error)
+      await entered.promise
+      await loader.update('app', { config: 3 })
+      finish.resolve()
+      expect(await older).toBe(failure)
+      expect(accepted).toBe(3)
+      expect(loader.store.app.innerFiber?.config).toBe(3)
+      expect(loader.errors).toEqual([])
+    } finally {
+      finish.resolve()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('clear a rejected activation target when a disabled expression withdraws it', async () => {
+    const { ctx, loader } = await setup()
+    const failure = new Error('withdrawn activation target')
+    loader.modules.app = {
+      apply(ctx: Context) {
+        ctx.on('internal/update', () => { throw failure })
+      },
+    }
+    try {
+      await loader.read([{ id: 'app', name: 'app', config: 1 }])
+      await expect(loader.update('app', { config: 2 })).rejects.toBe(failure)
+      expect(loader.errors).toEqual([failure])
+      await loader.read([{ id: 'app', name: 'app', config: 2, disabled: { __jsExpr: 'true' } }])
+      expect(loader.store.app.disabled).toBe(true)
+      expect(loader.errors).toEqual([])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
 })

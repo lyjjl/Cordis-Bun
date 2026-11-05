@@ -245,6 +245,10 @@ export class Include extends EntryTree {
   static inject = ['loader']
 
   public filename: string
+  /** The latest unsuccessful file read/parse; cleared by a successful read. */
+  public readError: unknown
+  /** The latest unsuccessful save; cleared only by a successful file write. */
+  public writeError: unknown
   private type: string
 
   /** The last file state we read or wrote. */
@@ -292,8 +296,10 @@ export class Include extends EntryTree {
     })
 
     if (config.watch) {
-      ctx.inject(['fs'], (ctx) => {
-        ctx.fs.watch(this.filename).on('change', () => this.refresh())
+      ctx.inject(['fs'], async (ctx) => {
+        const watcher = ctx.fs.watch(this.filename)
+        watcher.on('change', () => this.refresh())
+        await ctx.join(watcher.dispose)
       })
     }
   }
@@ -390,6 +396,7 @@ export class Include extends EntryTree {
         try {
           await this._write()
         } catch (error) {
+          this.writeError = error
           this.ctx.logger.error(error)
         }
       }
@@ -397,6 +404,16 @@ export class Include extends EntryTree {
   }
 
   private async _read() {
+    try {
+      await this._readFile()
+      this.readError = undefined
+    } catch (error) {
+      this.readError = error
+      throw error
+    }
+  }
+
+  private async _readFile() {
     let content: string
     try {
       content = await readFile(this.filename, 'utf8')
@@ -467,7 +484,10 @@ export class Include extends EntryTree {
   private async _write() {
     if (!this.cache || !this.journal.size) return
     const current = await readFile(this.filename, 'utf8').catch((error) => {
-      if (isENOENT(error)) return undefined
+      if (isENOENT(error)) {
+        this.writeError = error
+        return undefined
+      }
       throw error
     })
     if (current === undefined) {
@@ -521,7 +541,8 @@ export class Include extends EntryTree {
 
     try {
       await access(this.filename, constants.W_OK)
-    } catch {
+    } catch (error) {
+      this.writeError = error
       restore()
       this.ctx.logger.warn('config file %C is read-only, %d pending change(s) kept in memory', this.filename, this.journal.size)
       return
@@ -562,6 +583,7 @@ export class Include extends EntryTree {
         }
         try {
           await rename(tmp, this.filename)
+          this.writeError = undefined
           return
         } catch (error) {
           if (attempt >= RENAME_RETRIES || !isTransientRenameError(error)) throw error
@@ -569,6 +591,7 @@ export class Include extends EntryTree {
         await sleep(RENAME_BACKOFF * (attempt + 1))
       }
     } catch (error) {
+      if (!(error instanceof StaleWriteError)) this.writeError = error
       await rm(tmp, { force: true }).catch(() => {})
       throw error
     }

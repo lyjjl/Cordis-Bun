@@ -8,6 +8,7 @@ export class EntryGroup {
   static readonly key = Symbol.for('cordis.group')
 
   public data: EntryOptions[] = []
+  private _optionErrors: EntryValidationError[] = []
 
   constructor(public ctx: Context, public tree: EntryTree) {
     const entry = ctx.fiber.entry
@@ -16,6 +17,11 @@ export class EntryGroup {
 
   get context(): Context {
     return this.ctx
+  }
+
+  /** Rejections of options in the current group data, before an Entry exists. */
+  get errors(): readonly EntryValidationError[] {
+    return this._optionErrors
   }
 
   async create(options: Omit<EntryOptions, 'id'>) {
@@ -39,6 +45,7 @@ export class EntryGroup {
 
   private _reject(options: EntryOptions, issues: Issue[]) {
     const error = new EntryValidationError(issues)
+    if (this.data.includes(options)) this._optionErrors.push(error)
     const id = options?.id
     if (isNullable(id)) return error
     // unregistered first, so the disposal is not taken for a self-dispose
@@ -78,6 +85,7 @@ export class EntryGroup {
   }
 
   async update(config: EntryOptions[]) {
+    this._optionErrors = []
     const oldConfig = this.data as EntryOptions[]
     this.data = config
     const oldMap = Object.fromEntries(oldConfig.map(options => [options?.id, options]))
