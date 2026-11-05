@@ -365,9 +365,9 @@ describe('HMR', () => {
       const reloaded = ctx.hmr.reconcile(() => [plugin.path])
       await inside
 
-      await entry.update({ disabled: true })
+      const disabling = entry.update({ disabled: true })
       gate.release?.()
-      await reloaded
+      await Promise.all([disabling, reloaded])
 
       expect(entry.disabled).to.equal(true)
       expect(entry.innerFiber).to.equal(previous)
@@ -413,6 +413,7 @@ describe('HMR', () => {
       let patches = 0
       let firstInstalled: Fiber | undefined
       let updating: Promise<void> | undefined
+      let disabling: Promise<void> | undefined
       let reenabled: Promise<void> | undefined
       const stop = ctx.on('loader/patch-context', async (patched, next) => {
         if (patched !== entry) return next()
@@ -424,7 +425,7 @@ describe('HMR', () => {
         return next()
       })
       try {
-        await entry.update({ disabled: true })
+        disabling = entry.update({ disabled: true })
         updating = entry.update({ disabled: false })
         await waitFor(() => patches === 1)
         // Joining through init() observes its completion before the outer update().
@@ -440,7 +441,7 @@ describe('HMR', () => {
         releaseFirst()
         await waitFor(() => patches === 2)
         releaseSecond()
-        await Promise.all([updating, reenabled, reloaded])
+        await Promise.all([disabling, updating, reenabled, reloaded])
         await firstInstalled?.await()
         await ctx.loader.await()
 
@@ -454,7 +455,7 @@ describe('HMR', () => {
         releaseSecond()
         disarm(gate)
         stop()
-        await Promise.allSettled([updating, reenabled, reloaded])
+        await Promise.allSettled([disabling, updating, reenabled, reloaded])
         // Remove any duplicate produced by a failing implementation before cleanup reloads.
         const current = entry.innerFiber && Object.getPrototypeOf(entry.innerFiber)
         await Promise.all(gate.fibers.filter(fiber => fiber !== current).map(fiber => fiber.dispose()))
@@ -512,13 +513,13 @@ describe('HMR', () => {
         await inside
         await waitFor(() => gate.acquired === 0)
 
-        await host.update({ disabled: true })
+        const disabling = host.update({ disabled: true })
         await host.update({ disabled: false })
         expect(hostRoot.uid).to.equal(null)
         expect(host.innerFiber?.uid ?? null).to.not.equal(null)
 
         gate.release?.()
-        await reloaded
+        await Promise.all([disabling, reloaded])
 
         // the stale child would be rebuilt under the disposed host and throw
         expect(warnings.filter(w => w.includes('failed to reload'))).to.deep.equal([])

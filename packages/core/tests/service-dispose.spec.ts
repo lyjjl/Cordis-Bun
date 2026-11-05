@@ -190,9 +190,10 @@ describe('Service disposal', () => {
       ctx.foo.read()
       throw error
     })
-    await root.fiber.dispose()
+    const stopping = root.fiber.dispose()
+    await expect(stopping).rejects.toBeInstanceOf(AggregateError)
+    await expect(stopping).rejects.toMatchObject({ errors: [error] })
     expect(timeline).toEqual(['consumer read: open', 'provider closed'])
-    expect(log).toHaveBeenCalledWith(error)
     log.mockRestore()
   })
 

@@ -1,15 +1,21 @@
 import { Dict } from 'cosmokit'
 import { EventsService } from './events.ts'
 import { LoggerService } from './logger.ts'
-import { ReflectService } from './reflect.ts'
+import { activation, ReflectService, serviceScope } from './reflect.ts'
+import type { ServiceScope } from './reflect.ts'
+import type { ResourceScope } from './resources.ts'
 import { InjectKey, RegistryService } from './registry.ts'
 import { getTraceable, symbols } from './utils.ts'
 import { Fiber } from './fiber.ts'
+import type { Activation } from './fiber.ts'
 
 export interface Context {
   [symbols.root]: this
   [symbols.isolate]: Dict<symbol>
   [symbols.intercept]: Dict
+  [serviceScope]: ServiceScope
+  readonly [activation]: Activation
+  readonly resources: ResourceScope
   baseUrl?: string | undefined
   events: EventsService
   logger: LoggerService
@@ -36,6 +42,7 @@ export class Context {
   constructor() {
     this[symbols.isolate] = Object.create(null)
     this[symbols.intercept] = Object.create(null)
+    this[serviceScope] = { keys: new Map() }
     const self = new Proxy<this>(this, ReflectService.handler)
     this[symbols.root] = self
     this.baseUrl = undefined
@@ -58,6 +65,10 @@ export class Context {
     for (const prop of Reflect.ownKeys(meta)) {
       Object.defineProperty(self, prop, Reflect.getOwnPropertyDescriptor(meta, prop)!)
     }
+    const definition = (shadow ?? Reflect.get(meta, symbols.shadow)) as Context | undefined
+    if (definition && !Object.hasOwn(meta, 'resources')) {
+      Object.defineProperty(self, 'resources', { value: definition.resources })
+    }
     if (!shadow) return self
     return Object.assign(Object.create(self), { [symbols.shadow]: shadow })
   }
@@ -66,6 +77,14 @@ export class Context {
     const shadow = Object.create(this[symbols.isolate])
     shadow[name] = label ?? Symbol(name)
     return this.extend({ [symbols.isolate]: shadow })
+  }
+
+  scope(label?: string): this {
+    const scope: ServiceScope = { parent: this[serviceScope], label, keys: new Map() }
+    const parent = this.extend({ [serviceScope]: scope })
+    const child = parent.plugin({ name: label ?? 'scope', apply() {} })
+    child.runtime!.scope = true
+    return child.ctx as this
   }
 
   intercept<K extends InjectKey>(name: K, config: Context[K] extends { [symbols.metadata]: infer T } ? T : never): this

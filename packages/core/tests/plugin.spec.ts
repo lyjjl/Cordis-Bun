@@ -26,6 +26,51 @@ describe('Plugin', () => {
     expect(callback.mock.calls[0].arguments[1]).to.deep.equal(options)
   })
 
+  it('collect effects returned by a function declaration plugin', async () => {
+    const root = new Context()
+    const calls: string[] = []
+    function plugin() {
+      calls.push('start')
+      return () => { calls.push('stop') }
+    }
+    const fiber = await root.plugin(plugin)
+    expect(calls).to.deep.equal(['start'])
+    await fiber.dispose()
+    expect(calls).to.deep.equal(['start', 'stop'])
+    await root.fiber.dispose()
+  })
+
+  it('await effects returned by a constructible asynchronous factory', async () => {
+    const root = new Context()
+    const calls: string[] = []
+    function plugin() {
+      return Promise.resolve(() => { calls.push('stop') })
+    }
+    const fiber = await root.plugin(plugin)
+    expect(calls).to.deep.equal([])
+    await fiber.dispose()
+    expect(calls).to.deep.equal(['stop'])
+    await root.fiber.dispose()
+  })
+
+  it('keep callable service instances separate from cleanup functions', async () => {
+    const root = new Context()
+    let invoked = 0
+    class Callable extends Service {
+      constructor(ctx: Context) {
+        super(ctx, 'callable')
+      }
+
+      [Service.invoke]() {
+        invoked++
+      }
+    }
+    const fiber = await root.plugin(Callable)
+    await fiber.dispose()
+    expect(invoked).to.equal(0)
+    await root.fiber.dispose()
+  })
+
   it('apply invalid plugin', async () => {
     const root = new Context()
     expect(() => root.plugin(undefined as any)).to.throw()
@@ -141,26 +186,6 @@ describe('Plugin', () => {
     expect(after).to.deep.equal(getHookSnapshot(root))
   })
 
-  it('root dispose', async () => {
-    const root = new Context()
-    const dispose = mock.fn()
-    const fiber = root.plugin(() => dispose)
-    expect(root.fiber.uid).to.equal(0)
-    expect(fiber.uid).to.equal(1)
-    expect(dispose.mock.calls).to.have.length(0)
-    expect(root.fiber._disposables.length).to.equal(1)
-    await root.fiber.dispose()
-    expect(root.fiber.uid).to.equal(0)
-    expect(fiber.uid).to.equal(null)
-    expect(dispose.mock.calls).to.have.length(1)
-    expect(root.fiber._disposables.length).to.equal(0)
-    await root.fiber.dispose()
-    expect(root.fiber.uid).to.equal(0)
-    expect(fiber.uid).to.equal(null)
-    expect(dispose.mock.calls).to.have.length(1)
-    expect(root.fiber._disposables.length).to.equal(0)
-  })
-  
   it('Service.init', async () => {
     const start = mock.fn()
     const stop = mock.fn()

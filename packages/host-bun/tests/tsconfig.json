@@ -1,0 +1,6 @@
+{
+  "extends": "../../../tsconfig.test",
+  "compilerOptions": {
+    "types": ["node", "bun", "@cordisjs/unyaml/types"]
+  }
+}

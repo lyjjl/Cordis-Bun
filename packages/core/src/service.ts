@@ -1,6 +1,6 @@
 import { defineProperty, isNullable } from 'cosmokit'
 import { Context } from './context.ts'
-import { locate } from './reflect.ts'
+import { includesScope, locate, serviceScope } from './reflect.ts'
 import { createCallable, joinPrototype, symbols, Tracker } from './utils.ts'
 
 export abstract class Service<out T = never> {
@@ -14,6 +14,7 @@ export abstract class Service<out T = never> {
   static readonly resolveIntercept: unique symbol = symbols.resolveIntercept
 
   declare [symbols.metadata]: T
+  declare [symbols.caller]?: Context
 
   public name!: string
 
@@ -37,7 +38,9 @@ export abstract class Service<out T = never> {
   }
 
   protected [symbols.filter](ctx: Context) {
+    const definition = (this.ctx[symbols.shadow] as Context | undefined) ?? this.ctx
     return ctx[symbols.isolate][this.name] === this.ctx[symbols.isolate][this.name]
+      && includesScope(ctx[serviceScope], definition[serviceScope])
   }
 
   protected [symbols.extend](props?: any) {
@@ -63,7 +66,8 @@ export abstract class Service<out T = never> {
       }
       intercept = Object.getPrototypeOf(intercept)
     }
-    const value = locate((this as any)[symbols.caller] ?? this.ctx, this.name)?.fiber?.inject[this.name]
+    // The declaration is trusted in-process metadata parameterized by this service.
+    const value = locate(this[symbols.caller] ?? this.ctx, this.name)?.config as T | undefined
     if (!isNullable(value)) values.unshift(value)
     const merge = this[symbols.mergeIntercept] ?? Service.prototype[symbols.mergeIntercept]
     return merge.apply(this, values)

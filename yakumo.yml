@@ -1,4 +1,5 @@
 - name: yakumo
 - name: yakumo-tsc
 - name: yakumo-esbuild
+- name: ./scripts/build-bun.ts
 - name: yakumo-vitest

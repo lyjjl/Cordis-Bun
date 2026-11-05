@@ -75,6 +75,7 @@ export abstract class EntryTree {
   public enableLogs?: boolean
   public root: EntryGroup
   public store: Dict<Entry> = Object.create(null)
+  private _disposals = new Set<Promise<void>>()
 
   constructor(ctx: Context) {
     this.ctx = ctx.extend({ baseUrl: ctx.baseUrl })
@@ -96,9 +97,22 @@ export abstract class EntryTree {
   }
 
   getTasks() {
-    return [...this.entries()]
-      .flatMap(entry => entry._initTask || [entry.outerFiber?.inertia, entry.innerFiber?.inertia])
-      .filter(isNonNullable)
+    return [
+      ...this._disposals,
+      ...[...this.entries()]
+        .flatMap(entry => entry._initTask || [entry.outerFiber?.inertia, entry.innerFiber?.inertia])
+        .filter(isNonNullable),
+    ]
+  }
+
+  _trackDisposal(task: Promise<void>) {
+    this._disposals.add(task)
+    const settled = () => {
+      this._disposals.delete(task)
+      if (!this.getTasks().length) this.ctx.reflect.notify(['loader'])
+    }
+    task.then(settled, settled)
+    return task
   }
 
   async await() {
@@ -196,6 +210,9 @@ export abstract class EntryTree {
   }
 
   import(name: string, getOuterStack?: () => string[]) {
+    if (this.ctx.loader.moduleSource) {
+      return this.ctx.loader.moduleSource.import(name, this.ctx.baseUrl)
+    }
     // On Windows, a drive-letter path is converted with `pathToFileURL`.
     if (process.platform === 'win32' && driveLetter.test(name)) {
       name = pathToFileURL(name).href

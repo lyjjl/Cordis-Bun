@@ -1,4 +1,4 @@
-import { Context, Fiber, FiberState, Service, ValidationError } from 'cordis'
+import { Context, Fiber, FiberState, Plugin, Service, ValidationError } from 'cordis'
 import { Awaitable, defineProperty } from 'cosmokit'
 import { ModuleLoader, unwrapExports } from '@cordisjs/loader-utils'
 import { Entry, EntryOptions } from './config/entry.ts'
@@ -35,9 +35,15 @@ declare module 'cordis' {
   }
 }
 
+export interface ModuleSource {
+  import(specifier: string, parentURL?: string): Promise<unknown>
+  unwrapExports(exports: unknown): Plugin
+}
+
 export namespace Loader {
   export interface Config {
     baseUrl?: string
+    modules?: ModuleSource
   }
 
   export interface Intercept {
@@ -53,10 +59,12 @@ export class Loader extends EntryTree {
     : { startTime: Date.now() }
 
   public name = 'loader'
-  public internal = ModuleLoader.fromInternal()
+  public internal = process.versions.bun ? undefined : ModuleLoader.fromInternal()
+  public moduleSource?: ModuleSource
 
   constructor(ctx: Context, public config: Loader.Config = {}) {
     super(ctx)
+    this.moduleSource = config.modules
     if (config.baseUrl) {
       this.ctx.baseUrl = config.baseUrl
     }
@@ -150,9 +158,8 @@ export class Loader extends EntryTree {
       const { entry } = fiber
       this.showLog(entry, 'unload')
 
-      // case 5: the entry's parent is being unloaded, which takes the entry with it
-      // (the parent may still be registered, e.g. when it has lost a dependency)
-      if (fiber.parent.fiber.state === FiberState.UNLOADING) return
+      // case 5: a retiring parent owns this stop, including during initialization
+      if (!fiber.parent.fiber.accepting) return
 
       // case 6: the entry is being removed by the loader (`EntryGroup.remove`
       // unregisters it before disposing the fiber)
@@ -196,8 +203,14 @@ export class Loader extends EntryTree {
     }
   }
 
-  unwrapExports(exports: any) {
-    return unwrapExports(exports)
+  get errors() {
+    return [...new Set([...this.entries()].flatMap(entry => entry.errors))]
+  }
+
+  unwrapExports(exports: unknown): Plugin {
+    return this.moduleSource
+      ? this.moduleSource.unwrapExports(exports)
+      : unwrapExports(exports)
   }
 }
 

@@ -3,24 +3,36 @@
   "private": true,
   "type": "module",
   "version": "0.0.0",
-  "packageManager": "yarn@4.14.1",
+  "packageManager": "bun@1.4.4",
   "workspaces": [
     "external/*",
     "packages/*"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lyjjl/Cordis-Bun.git"
+  },
   "scripts": {
+    "start": "bun packages/core/bin.js",
     "lint": "eslint --cache --ext .ts .",
     "yakumo": "node --expose-internals --import tsx --import @cordisjs/unyaml node_modules/yakumo/lib/cli.js",
-    "build": "yarn yakumo esbuild && yarn yakumo tsc",
-    "test": "yarn yakumo vitest --import tsx",
-    "test:text": "shx rm -rf coverage && yarn test --coverage --coverage.reporter text",
-    "test:json": "shx rm -rf coverage && yarn test --coverage --coverage.reporter json",
-    "test:html": "shx rm -rf coverage && yarn test --coverage --coverage.reporter html"
+    "build": "bun run build:js && bun run build:types",
+    "build:js": "bun run yakumo esbuild",
+    "build:types": "bun run yakumo tsc",
+    "typecheck": "tsc --project packages/core/tsconfig.json --noEmit --composite false --incremental false",
+    "test": "bun run yakumo vitest --import tsx",
+    "test:core": "bun run test core",
+    "test:bun": "bun packages/core/tests/bun-smoke.ts && bun packages/core/tests/bun-activation.ts && bun packages/host-bun/tests/native.ts && bun packages/host-bun/tests/generations.ts && bun packages/host-bun/tests/normalization.ts && bun packages/host-bun/tests/resources.ts && bun packages/hmr/tests/bun-smoke.ts && bun packages/hmr/tests/bun-generations.ts && bun packages/hmr/tests/bun-rollback.ts",
+    "test:bun:only": "bun packages/host-bun/tests/bun-only.ts",
+    "test:text": "shx rm -rf coverage && bun run test --coverage --coverage.reporter text",
+    "test:json": "shx rm -rf coverage && bun run test --coverage --coverage.reporter json",
+    "test:html": "shx rm -rf coverage && bun run test --coverage --coverage.reporter html"
   },
   "devDependencies": {
     "@cordisjs/eslint-config": "^1.1.1",
     "@cordisjs/unyaml": "^2.0.3",
+    "@types/bun": "1.4.4",
     "@types/node": "^25.3.5",
     "@vitest/coverage-v8": "^4.1.5",
     "esbuild": "^0.28.0",

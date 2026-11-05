@@ -87,23 +87,13 @@ export default function isolate(ctx: Context) {
     }
 
     // step 2: generate service diff
-    const diff: Dict<[symbol, symbol, symbol, symbol]> = Object.create(null)
+    const changed: [string, symbol | undefined, symbol | undefined][] = []
     const oldMap = entry.ctx[Context.isolate]
     for (const name in { ...newMap, ...delims }) {
       if (newMap[name] === oldMap[name]) continue
+      changed.push([name, oldMap[name], newMap[name]])
       const delim = delims[name] ??= Symbol(`delim:${name}`)
       entry.ctx[delim] = Symbol(`${name}#${entry.id}`)
-      for (const symbol of [oldMap[name], newMap[name]]) {
-        const impl = symbol && entry.ctx.reflect.store[symbol]
-        if (!impl) continue
-        const fiber = impl.ctx.fiber
-        if (!fiber) {
-          entry.ctx.logger.warn(new Error(`expected service ${name} to be implemented`))
-          continue
-        }
-        diff[name] = [oldMap[name], newMap[name], entry.ctx[delim], fiber.ctx[delim]]
-        if (entry.ctx[delim] !== fiber.ctx[delim]) break
-      }
     }
 
     // step 3: set prototype for transferred context
@@ -113,23 +103,12 @@ export default function isolate(ctx: Context) {
     // step 4: reload fiber
     await next()
 
-    // step 5: replace service impl
-    for (const [symbol1, symbol2, flag1, flag2] of Object.values(diff)) {
-      const impl = entry.ctx.reflect.store[symbol1]
-      if (flag1 === flag2 && impl && !entry.ctx.reflect.store[symbol2]) {
-        entry.ctx.reflect.store[symbol2] = impl
-        delete entry.ctx.reflect.store[symbol1]
-        impl.isolate = symbol2
-      }
+    // Native reflection owns physical scope relocation and binding refresh.
+    for (const [name, from, to] of changed) {
+      const delimiter = delims[name]
+      const owner = entry.ctx[delimiter]
+      entry.ctx.reflect._relocate(name, from, to, target => target[delimiter] === owner)
     }
-
-    // step 6: reflect notify
-    ctx.reflect.notify(Object.keys(diff), (ctx, name) => {
-      const [symbol1, symbol2, flag1, flag2] = diff[name]
-      const symbol3 = ctx[Context.isolate][name]
-      const flag3 = ctx[delims[name]]
-      return (symbol1 === symbol3 || symbol2 === symbol3) && (flag1 === flag3) !== (flag1 === flag2)
-    })
 
     // step 7: clean up delimiters
     for (const name in delims) {

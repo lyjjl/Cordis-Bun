@@ -182,82 +182,65 @@ describe('Fiber', () => {
     expect(fiber.state).to.equal(FiberState.FAILED)
   })
 
-  it('dispose error', async () => {
-    const root = new Context()
-    const error = mock.fn()
-    ;(root.logger as any).error = error
-    const dispose = mock.fn(() => {
-      throw new Error('test')
-    })
-    const plugin = (ctx: Context) => {
-      return dispose
-    }
-
-    const fiber = await root.plugin(plugin)
-    expect(dispose.mock.calls).to.have.length(0)
-    await expect(fiber.dispose()).resolves.toBeUndefined()
-    await sleep()
-    expect(dispose.mock.calls).to.have.length(1)
-    expect(error.mock.calls).to.have.length(1)
-  })
-
-  it('settles a pending fiber to DISPOSED on dispose', async () => {
+  it('drains resources and closes admission when a pending fiber is disposed', async () => {
     const root = new Context()
     const fiber = root.inject(['never-provided'], () => {})
-    const target = Object.getPrototypeOf(fiber)
-    const transitions: [FiberState, FiberState][] = []
-    const off = root.on('internal/status', (current, oldState) => {
-      if (current === target) {
-        transitions.push([oldState, current.state])
-      }
+    const owner = fiber.ctx.resources
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let closed = false
+    owner.effect(async () => {
+      entered.resolve()
+      await release.promise
+      closed = true
     })
 
     try {
       expect(fiber.state).to.equal(FiberState.PENDING)
-
-      await fiber.dispose()
-
+      const stopping = fiber.dispose()
+      expect(fiber.accepting).to.equal(false)
+      expect(owner.active).to.equal(false)
+      expect(owner.signal.aborted).to.equal(true)
+      expect(owner.acquire()).to.equal(undefined)
+      await entered.promise
+      expect(closed).to.equal(false)
+      release.resolve()
+      await stopping
+      expect(closed).to.equal(true)
       expect(fiber.uid).to.equal(null)
       expect(fiber.inertia).to.equal(undefined)
       expect(fiber.state).to.equal(FiberState.DISPOSED)
-      expect(transitions).to.deep.equal([
-        [FiberState.PENDING, FiberState.DISPOSED],
-      ])
+      expect(owner.diagnostics().state).to.equal('disposed')
     } finally {
-      off()
+      release.resolve()
+      await root.fiber.dispose()
     }
   })
 
-  it('settles a failed fiber to DISPOSED on dispose', async () => {
+  it('settles a failed fiber to DISPOSED without reopening resource admission', async () => {
     const root = new Context()
-    ;(root.logger as any).error = mock.fn()
-
-    const fiber = root.plugin(() => {
+    root.logger.error = () => {}
+    let closed = false
+    const fiber = root.plugin((ctx) => {
+      ctx.resources.effect(() => { closed = true })
       throw new Error('boom')
     })
-    const target = Object.getPrototypeOf(fiber)
-    const transitions: [FiberState, FiberState][] = []
-
-    await expect(fiber.await()).rejects.toThrow('boom')
-    expect(fiber.state).to.equal(FiberState.FAILED)
-
-    const off = root.on('internal/status', (current, oldState) => {
-      if (current === target) {
-        transitions.push([oldState, current.state])
-      }
-    })
+    const owner = fiber.ctx.resources
 
     try {
+      await expect(fiber.await()).rejects.toThrow('boom')
+      expect(fiber.state).to.equal(FiberState.FAILED)
+      expect(closed).to.equal(true)
       await fiber.dispose()
-
       expect(fiber.uid).to.equal(null)
       expect(fiber.inertia).to.equal(undefined)
       expect(fiber.state).to.equal(FiberState.DISPOSED)
-      expect(transitions).to.deep.equal([
-        [FiberState.FAILED, FiberState.DISPOSED],
-      ])
+      expect(fiber.accepting).to.equal(false)
+      expect(owner.active).to.equal(false)
+      expect(owner.acquire()).to.equal(undefined)
+      expect(owner.diagnostics().state).to.equal('disposed')
     } finally {
-      off()
+      await root.fiber.dispose()
     }
   })
 

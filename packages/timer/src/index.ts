@@ -8,6 +8,24 @@ declare module 'cordis' {
 
 type Scheduled<F extends (...args: any[]) => any> = ((...args: Parameters<F>) => void) & { dispose: () => void }
 
+function invoke(
+  ctx: Context,
+  callback: (...args: never[]) => unknown,
+  label: string,
+  thisArg?: unknown,
+  args?: unknown[],
+) {
+  const owner = ctx.fiber
+  if (!owner.accepting) return
+  ctx.task(() => {
+    const result = args ? Reflect.apply(callback, thisArg, args) : callback.call(thisArg)
+    if (result && (typeof result === 'object' || typeof result === 'function')
+      && 'then' in result && typeof result.then === 'function') {
+      return Promise.resolve(result).catch(error => owner.ctx.logger.error(error))
+    }
+  }, label)
+}
+
 export class TimerService extends Service {
   constructor(ctx: Context) {
     super(ctx, 'timer')
@@ -30,22 +48,35 @@ export class TimerService extends Service {
     const callback = typeof args[0] === 'function' ? args.shift() : undefined
     const delay = args[0] as number
     if (callback) {
-      const dispose = this.ctx.effect(() => {
+      const ctx = this.ctx
+      const dispose = ctx.effect(() => {
         const timer = setTimeout(() => {
           dispose()
-          callback()
+          invoke(ctx, callback, 'ctx.timeout()')
         }, delay)
         return () => clearTimeout(timer)
       }, 'ctx.timeout()')
       return dispose
     } else {
+      const signal = this.ctx.fiber.signal
       const { promise, resolve, reject } = Promise.withResolvers<void>()
       const dispose = this.ctx.effect(() => {
-        const timer = setTimeout(resolve, delay)
-        return () => {
+        let active = true
+        const timer = setTimeout(() => {
+          active = false
+          signal.removeEventListener('abort', cancel)
+          resolve()
+        }, delay)
+        const cancel = () => {
+          if (!active) return
+          active = false
           clearTimeout(timer)
+          signal.removeEventListener('abort', cancel)
           reject(new Error('Context has been disposed'))
         }
+        signal.addEventListener('abort', cancel)
+        if (signal.aborted) cancel()
+        return cancel
       }, 'ctx.timeout()')
       return promise.finally(dispose)
     }
@@ -57,23 +88,34 @@ export class TimerService extends Service {
     const callback = typeof args[0] === 'function' ? args.shift() : undefined
     const delay = args[0] as number
     if (callback) {
-      return this.ctx.effect(() => {
-        const timer = setInterval(callback, delay)
+      const ctx = this.ctx
+      return ctx.effect(() => {
+        const timer = setInterval(function (this: unknown) {
+          invoke(ctx, callback, 'ctx.interval()', this)
+        }, delay)
         return () => clearInterval(timer)
       }, 'ctx.interval()')
     } else {
+      const signal = this.ctx.fiber.signal
       let done: { kind: 'return'; value: any } | { kind: 'throw'; reason: any } | undefined
       const nextTasks: PromiseWithResolvers<IteratorResult<void>>[] = []
       const dispose = this.ctx.effect(() => {
+        let active = true
         const timer = setInterval(() => {
           nextTasks.shift()?.resolve({ done: false, value: undefined })
         }, delay)
-        return () => {
+        const cancel = () => {
+          if (!active) return
+          active = false
           clearInterval(timer)
+          signal.removeEventListener('abort', cancel)
           if (done) return
           done = { kind: 'throw', reason: new Error('Context has been disposed') }
           for (const task of nextTasks.splice(0)) task.reject(done.reason)
         }
+        signal.addEventListener('abort', cancel)
+        if (signal.aborted) cancel()
+        return cancel
       }, 'ctx.interval()')
       return {
         next: () => {
@@ -107,13 +149,14 @@ export class TimerService extends Service {
   private _schedule(label: string, trigger: (args: any[]) => number | NodeJS.Timeout | undefined) {
     let timer: number | NodeJS.Timeout | undefined
     let isDisposed = false
-    const dispose = this.ctx.effect(() => () => {
+    const ctx = this.ctx
+    const dispose = ctx.effect(() => () => {
       isDisposed = true
       clearTimeout(timer)
       timer = undefined
     }, label)
     const wrapper: any = (...args: any[]) => {
-      if (isDisposed) return
+      if (isDisposed || !ctx.fiber.accepting) return
       clearTimeout(timer)
       timer = trigger(args)
     }
@@ -123,9 +166,10 @@ export class TimerService extends Service {
 
   throttle<F extends (...args: any[]) => any>(callback: F, delay: number, noTrailing?: boolean): Scheduled<F> {
     let lastCall = -Infinity
+    const ctx = this.ctx
     const execute = (...args: any[]) => {
       lastCall = Date.now()
-      callback(...args)
+      invoke(ctx, callback, 'ctx.throttle()', undefined, args)
     }
     return this._schedule('ctx.throttle()', (args) => {
       const now = Date.now()
@@ -139,8 +183,11 @@ export class TimerService extends Service {
   }
 
   debounce<F extends (...args: any[]) => any>(callback: F, delay: number): Scheduled<F> {
+    const ctx = this.ctx
     return this._schedule('ctx.debounce()', (args) => {
-      return setTimeout(callback, delay, ...args)
+      return setTimeout(function (this: unknown) {
+        invoke(ctx, callback, 'ctx.debounce()', this, args)
+      }, delay)
     })
   }
 }

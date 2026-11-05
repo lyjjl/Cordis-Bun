@@ -18,6 +18,11 @@ export class DisposableList<T extends WeakKey> {
     return () => this.map.delete(sn)
   }
 
+  has(value: T) {
+    const sn = this.weak.get(value)
+    return sn !== undefined && this.map.has(sn)
+  }
+
   delete(value: T) {
     const sn = this.weak.get(value)
     if (!sn) return false
@@ -45,10 +50,13 @@ export interface Tracker {
   noShadow?: boolean
 }
 
+const caller: unique symbol = Symbol.for('cordis.caller')
+
 export const symbols = {
   // internal symbols
   shadow: Symbol.for('cordis.shadow'),
-  caller: Symbol.for('cordis.caller'),
+  // Preserve the exact key type through the exported, mutable symbol table.
+  caller: caller as typeof caller,
   receiver: Symbol.for('cordis.receiver'),
   original: Symbol.for('cordis.original'),
   decorator: Symbol.for('cordis.decorator'),

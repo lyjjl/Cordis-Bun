@@ -1,0 +1,11 @@
+- id: logger
+  name: '@cordisjs/plugin-logger-console'
+- id: filesystem
+  name: '@cordisjs/plugin-fs-node'
+- id: timer
+  name: '@cordisjs/plugin-timer'
+- id: code-updates
+  name: '@cordisjs/plugin-hmr'
+  config:
+    watch:
+      enabled: true

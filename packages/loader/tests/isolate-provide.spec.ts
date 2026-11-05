@@ -1,5 +1,6 @@
 import { expect, describe, it } from 'vitest'
 import { Context, FiberState } from 'cordis'
+import type { Fiber, Plugin } from 'cordis'
 import { setImmediate } from 'node:timers/promises'
 import MockLoader from './utils.ts'
 
@@ -32,12 +33,14 @@ function slots(ctx: Context, name: string): Slot[] {
   return found
 }
 
-async function boot(plugins: Record<string, (ctx: Context, config?: any) => void>) {
+async function boot(plugins: Record<string, Plugin.Function>, scoped = false) {
   const root = new Context()
-  await root.plugin(MockLoader)
-  const loader = root.loader as MockLoader
+  const host = scoped ? root.scope('loader') : root
+  if (scoped) await host.fiber.await()
+  await host.plugin(MockLoader)
+  const loader = host.loader as MockLoader
   for (const [name, plugin] of Object.entries(plugins)) loader.mock(name, plugin)
-  return { root, loader }
+  return { root, host, loader }
 }
 
 async function started(loader: MockLoader, id: string) {
@@ -308,6 +311,7 @@ describe('Service Isolation: provide migration', () => {
     expect(root.reflect.store[a.key]).to.equal(a.impl)
     expect(root.reflect.store[b.key]).to.equal(b.impl)
     expect(loader.expectFiber(first).ctx.svc.tag).to.equal('first')
+    expect(loader.expectFiber(first).diagnostics().provided[0].available).to.equal(true)
     expect(starts).to.deep.equal(['first', 'second'])
     expect(stops).to.deep.equal([])
 
@@ -350,4 +354,325 @@ describe('Service Isolation: provide migration', () => {
     expect(consumers.B.svc.tag).to.equal('second')
     expect(eventsB).to.deep.equal([])
   })
+
+  it.each([false, true])('restores, removes and re-registers every migrated layer (scoped: %s)', async (scoped) => {
+    let base!: () => Promise<void>
+    let top!: () => Promise<void>
+    const { root, host, loader } = await boot({
+      provider: (ctx) => {
+        base = ctx.provide('svc', { tag: 'base' })
+        top = ctx.provide('svc', { tag: 'top' }, { replace: true })
+      },
+    }, scoped)
+    const id = await loader.create({ name: 'provider' })
+    const provider = await started(loader, id)
+    const identities = provider.diagnostics().provided.map(value => value.binding)
+    await loader.update(id, { isolate: { svc: 'A' } })
+    const realm = host.isolate('svc', provider.ctx[Context.isolate].svc)
+    let sibling: Context | undefined
+    let siblingActivations = 0
+    if (scoped) {
+      const view = root.scope('sibling')
+      await view.fiber.await()
+      sibling = view.isolate('svc', provider.ctx[Context.isolate].svc)
+      sibling.provide('svc', { tag: 'sibling' })
+      await sibling.inject(['svc'], () => { siblingActivations++ })
+    }
+    const values: (string | undefined)[] = []
+    const optional = await realm.plugin({
+      optional: ['svc'],
+      apply(ctx: Context) { values.push(ctx.svc?.tag) },
+    })
+    const required = await realm.inject(['svc'], () => {})
+    expect(realm.get('svc')?.tag).to.equal('top')
+    expect(realm.reflect.diagnostics('svc').map(value => value.binding).sort()).to.deep.equal([...identities].sort())
+    await top()
+    await Promise.all([optional.await(), required.await()])
+    expect(realm.get('svc')?.tag).to.equal('base')
+    await base()
+    await Promise.all([optional.await(), required.await()])
+    expect(realm.get('svc')).to.equal(undefined)
+    expect(required.state).to.equal(FiberState.PENDING)
+    const replacement = realm.provide('svc', { tag: 'reused' })
+    await Promise.all([optional.await(), required.await()])
+    expect(realm.get('svc')?.tag).to.equal('reused')
+    expect(required.state).to.equal(FiberState.ACTIVE)
+    expect(values).to.deep.equal(['top', 'base', undefined, 'reused'])
+    if (sibling) {
+      expect(sibling.get('svc')?.tag).to.equal('sibling')
+      expect(siblingActivations).to.equal(1)
+    }
+    await replacement()
+    await root.fiber.dispose()
+  })
+
+  it.each([false, true])('withdraws a migrated stack completely on provider disposal (scoped: %s)', async (scoped) => {
+    const { root, host, loader } = await boot({
+      provider: (ctx) => {
+        ctx.provide('svc', { tag: 'base' })
+        ctx.provide('svc', { tag: 'top' }, { replace: true })
+      },
+    }, scoped)
+    const id = await loader.create({ name: 'provider' })
+    const provider = await started(loader, id)
+    await loader.update(id, { isolate: { svc: 'A' } })
+    const realm = host.isolate('svc', provider.ctx[Context.isolate].svc)
+    const consumer = await realm.inject(['svc'], () => {})
+    expect(realm.get('svc')?.tag).to.equal('top')
+    await provider.dispose()
+    await consumer.await()
+    expect(consumer.state).to.equal(FiberState.PENDING)
+    expect(realm.get('svc')).to.equal(undefined)
+    expect(realm.reflect.diagnostics('svc')).to.deep.equal([])
+    const replacement = realm.provide('svc', { tag: 'after disposal' })
+    await consumer.await()
+    expect(consumer.ctx.svc.tag).to.equal('after disposal')
+    await replacement()
+    await root.fiber.dispose()
+  })
+
+  it('moves only the transferred entry layers beneath an unrelated overlay', async () => {
+    let removeBase!: () => Promise<void>
+    const { root, loader } = await boot({
+      base: (ctx) => { removeBase = ctx.provide('svc', { tag: 'base' }) },
+      overlay: (ctx) => { ctx.provide('svc', { tag: 'unrelated' }, { replace: true }) },
+    })
+    const baseId = await loader.create({ name: 'base' })
+    const base = await started(loader, baseId)
+    const overlayId = await loader.create({ name: 'overlay' })
+    const overlay = await started(loader, overlayId)
+    let rootActivations = 0
+    const rootConsumer = await root.inject(['svc'], () => { rootActivations++ })
+    await loader.update(baseId, { isolate: { svc: 'A' } })
+    const realm = root.isolate('svc', base.ctx[Context.isolate].svc)
+    expect(root.svc.tag).to.equal('unrelated')
+    expect(realm.get('svc')?.tag).to.equal('base')
+    await rootConsumer.await()
+    expect(rootActivations).to.equal(1)
+    await overlay.dispose()
+    expect(root.get('svc')).to.equal(undefined)
+    expect(realm.get('svc')?.tag).to.equal('base')
+    await removeBase()
+    expect(realm.get('svc')).to.equal(undefined)
+    const replacement = realm.provide('svc', { tag: 'replacement' })
+    expect(realm.get('svc')?.tag).to.equal('replacement')
+    await replacement()
+    await root.fiber.dispose()
+  })
+
+  it.each([false, true])('re-resolves a moved decorator below its own layers (scoped: %s)', async (scoped) => {
+    const { root, host, loader } = await boot({
+      base: (ctx) => { ctx.provide('svc', { tag: 'base' }) },
+      decorator: Object.assign((ctx: Context) => {
+        const lower = ctx.svc
+        ctx.provide('svc', { tag: `wrapped(${lower.tag})` }, { replace: true })
+      }, { inject: ['svc'] }),
+    }, scoped)
+    const baseId = await loader.create({ name: 'base' })
+    const base = await started(loader, baseId)
+    const decoratorId = await loader.create({ name: 'decorator' })
+    const decorator = await started(loader, decoratorId)
+    expect(host.svc.tag).to.equal('wrapped(base)')
+    await loader.update(decoratorId, { isolate: { svc: 'A' } })
+    await decorator.await()
+    expect(decorator.state).to.equal(FiberState.PENDING)
+    expect(host.svc.tag).to.equal('base')
+    await base.dispose()
+    const realm = host.isolate('svc', decorator.ctx[Context.isolate].svc)
+    expect(realm.get('svc')).to.equal(undefined)
+    const remove = realm.provide('svc', { tag: 'new lower' })
+    await decorator.await()
+    expect(decorator.state).to.equal(FiberState.ACTIVE)
+    expect(realm.get('svc')?.tag).to.equal('wrapped(new lower)')
+    await remove()
+    await decorator.await()
+    expect(decorator.state).to.equal(FiberState.PENDING)
+    expect(realm.get('svc')).to.equal(undefined)
+    await root.fiber.dispose()
+  })
+
+  it.each([false, true])('releases ancestor fallback after a scoped consumer view changes (optional: %s)', async (optional) => {
+    const { root, host, loader } = await boot({}, true)
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const values: (string | undefined)[] = []
+    const reads: string[] = []
+    let closed = false
+    const provider = await root.plugin(ctx => {
+      ctx.provide('svc', { tag: 'ancestor' })
+      return () => { closed = true }
+    })
+    loader.mock('consumer', Object.assign((ctx: Context) => {
+      values.push(ctx.svc?.tag)
+      if (!ctx.svc) return
+      return async () => {
+        entered.resolve()
+        await release.promise
+        reads.push(ctx.svc.tag)
+      }
+    }, { inject: optional ? [] : ['svc'], optional: optional ? ['svc'] : [] }))
+    const id = await loader.create({ name: 'consumer' })
+    const consumer = await started(loader, id)
+    const sibling = root.scope('sibling')
+    await sibling.fiber.await()
+    const siblingConsumer = await sibling.inject(['svc'], () => {})
+    const moving = loader.update(id, { isolate: { svc: 'A' } })
+    try {
+      await entered.promise
+      expect(siblingConsumer.state).to.equal(FiberState.ACTIVE)
+      const stopping = provider.dispose()
+      await setImmediate()
+      expect(closed).to.equal(false)
+      release.resolve()
+      await Promise.all([moving, stopping, consumer.await()])
+      expect(reads).to.deep.equal(['ancestor'])
+      expect(closed).to.equal(true)
+      expect(consumer.state).to.equal(optional ? FiberState.ACTIVE : FiberState.PENDING)
+      expect(values).to.deep.equal(optional ? ['ancestor', undefined] : ['ancestor'])
+      const realm = host.isolate('svc', consumer.ctx[Context.isolate].svc)
+      expect(realm.get('svc')).to.equal(undefined)
+    } finally {
+      release.resolve()
+      await root.fiber.dispose()
+    }
+  })
+
+  it.each([false, true])('moves owned nested physical scopes without losing required or optional consumers (optional: %s)', async (optional) => {
+    let nested!: Context
+    let leaf!: Context
+    let consumer!: Fiber
+    let removeTop!: () => Promise<void>
+    let removeBase!: () => Promise<void>
+    let starts = 0
+    const values: (string | undefined)[] = []
+    const notifications: (string | undefined)[] = []
+    const { root, loader } = await boot({
+      provider: async (ctx) => {
+        starts++
+        nested = ctx.scope('nested bindings')
+        await nested.fiber.await()
+        nested.provide('svc', { tag: 'ancestor fallback' })
+        leaf = nested.scope('leaf bindings')
+        await leaf.fiber.await()
+        removeBase = leaf.provide('svc', { tag: 'base' })
+        removeTop = leaf.provide('svc', { tag: 'top' }, { replace: true })
+        leaf.on('internal/service', name => {
+          if (name === 'svc') notifications.push(leaf.get('svc')?.tag)
+        })
+        consumer = await leaf.plugin({
+          inject: optional ? [] : ['svc'],
+          optional: optional ? ['svc'] : [],
+          apply(view: Context) { values.push(view.svc?.tag) },
+        })
+      },
+    })
+    try {
+      const id = await loader.create({ name: 'provider' })
+      const provider = await started(loader, id)
+      const original = leaf.reflect.diagnostics('svc').map(value => value.binding)
+      await loader.update(id, { isolate: { svc: 'nested-realm' } })
+      await consumer.await()
+      expect(starts).to.equal(1)
+      expect(leaf.get('svc')?.tag).to.equal('top')
+      expect(nested.get('svc')?.tag).to.equal('ancestor fallback')
+      expect(leaf.reflect.diagnostics('svc').map(value => value.binding)).to.deep.equal(original)
+      expect(consumer.state).to.equal(FiberState.ACTIVE)
+      expect(values).to.deep.equal(['top'])
+      expect(notifications).to.deep.equal([])
+      expect(slots(root, 'svc').every(slot => slot.impl.isolate === provider.ctx[Context.isolate].svc)).to.equal(true)
+      await removeTop()
+      await consumer.await()
+      expect(leaf.get('svc')?.tag).to.equal('base')
+      await removeBase()
+      await consumer.await()
+      expect(leaf.get('svc')?.tag).to.equal('ancestor fallback')
+      expect(values).to.deep.equal(['top', 'base', 'ancestor fallback'])
+      expect(notifications).to.deep.equal(['base', 'ancestor fallback'])
+    } finally {
+      await root.fiber.dispose()
+    }
+  })
+
+  it.each([false, true])('withdraws ancestor realm fallback past a foreign local destination slot (optional: %s)', async (optional) => {
+    const values: (string | undefined)[] = []
+    const notifications: (string | undefined)[] = []
+    const { root, loader } = await boot({
+      provider: ctx => { ctx.provide('svc', { tag: 'moving ancestor' }) },
+      keepRealm: () => {},
+    })
+    let consumer: Fiber | undefined
+    let stopping: Promise<void> | undefined
+    try {
+      const id = await loader.create({ name: 'provider', isolate: { svc: 'fallback-source' } })
+      const provider = await started(loader, id)
+      const keep = await loader.create({ name: 'keepRealm', isolate: { svc: 'foreign-destination' } })
+      const destination = await started(loader, keep)
+      const nested = root.scope('unrelated physical descendant')
+      await nested.fiber.await()
+      const sourceView = nested.isolate('svc', provider.ctx[Context.isolate].svc)
+      const foreignView = nested.isolate('svc', destination.ctx[Context.isolate].svc)
+      foreignView.provide('svc', { tag: 'foreign local destination' })
+      const foreignReads: string[] = []
+      const foreignConsumer = await foreignView.inject(['svc'], ctx => { foreignReads.push(ctx.svc.tag) })
+      const foreignBinding = foreignConsumer.diagnostics().dependencies[0].binding
+      sourceView.on('internal/service', (name, value) => {
+        if (name === 'svc') notifications.push(value?.tag)
+      })
+      consumer = await sourceView.plugin({
+        inject: optional ? [] : ['svc'],
+        optional: optional ? ['svc'] : [],
+        apply(ctx: Context) { values.push(ctx.svc?.tag) },
+      })
+      expect(consumer.ctx.svc.tag).to.equal('moving ancestor')
+      const original = consumer.diagnostics().dependencies[0].binding
+      expect(original).to.be.a('number')
+      await loader.update(id, { isolate: { svc: 'foreign-destination' } })
+      await consumer.await()
+      let current: string | undefined
+      let inactive = false
+      try {
+        current = consumer.ctx.svc?.tag
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.includes('inactive context')) throw error
+        inactive = true
+      }
+      const afterMove = {
+        state: consumer.state,
+        binding: consumer.diagnostics().dependencies[0].binding,
+        current,
+        inactive,
+        values: [...values],
+        notifications: [...notifications],
+      }
+      stopping = provider.dispose()
+      const deadline = Promise.withResolvers<boolean>()
+      const timer = setTimeout(() => deadline.resolve(false), 1000)
+      let completed: boolean
+      try {
+        completed = await Promise.race([stopping.then(() => true), deadline.promise])
+      } finally {
+        clearTimeout(timer)
+      }
+      expect({ ...afterMove, completed }).to.deep.equal({
+        state: optional ? FiberState.ACTIVE : FiberState.PENDING,
+        binding: undefined,
+        current: undefined,
+        inactive: !optional,
+        values: optional ? ['moving ancestor', undefined] : ['moving ancestor'],
+        notifications: [undefined],
+        completed: true,
+      })
+      expect(foreignView.get('svc')?.tag).to.equal('foreign local destination')
+      await foreignConsumer.await()
+      expect(foreignConsumer.diagnostics().dependencies[0].binding).to.equal(foreignBinding)
+      expect(foreignConsumer.state).to.equal(FiberState.ACTIVE)
+      expect(foreignReads).to.deep.equal(['foreign local destination'])
+    } finally {
+      // Explicit consumer retirement also drains the pre-fix stuck provider.
+      await consumer?.dispose()
+      await stopping
+      await root.fiber.dispose()
+    }
+  })
+
 })

@@ -1,16 +1,5 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
-import { Context } from 'cordis'
-import { pathToFileURL } from 'node:url'
-import Loader from '@cordisjs/plugin-loader'
+import { run } from '@cordisjs/host-bun/cli'
 
-const ctx = new Context()
-ctx.baseUrl = pathToFileURL(process.cwd()).href + '/'
-
-await ctx.plugin(Loader)
-await ctx.loader.create({
-  name: '@cordisjs/plugin-include',
-  config: {
-    path: './cordis.yml',
-  },
-})
+await run()

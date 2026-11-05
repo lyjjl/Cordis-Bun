@@ -329,7 +329,8 @@ describe('Traceable caller', () => {
 
     let injected = false
     function Consumer(ctx: Context) {
-      return ctx.inject(['server'], ({ server }: any) => {
+      ctx.inject(['server'], (child) => {
+        const server: unknown = Reflect.get(child, 'server')
         injected = server instanceof Server
       })
     }

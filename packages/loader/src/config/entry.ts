@@ -63,9 +63,13 @@ export class Entry {
   public inject: Dict = Object.create(null)
 
   _initTask?: Promise<void> | undefined
-  _disposing = false
+  _disposing = 0
   _verdict?: boolean
   private _intercept: Dict = Object.create(null)
+  private _errors = new Map<string, unknown>()
+  private _importRevision = 0
+  private _initRevision = 0
+  private _initTaskRevision = 0
 
   constructor(public loader: Loader) {
     this.ctx = loader.ctx.extend({ [Entry.key]: this })
@@ -81,6 +85,19 @@ export class Entry {
       }
     }
     return target
+  }
+
+  get errors() {
+    const errors = [...this._errors.values()]
+    for (const fiber of [this.outerFiber, this.innerFiber]) {
+      if (fiber?.state === FiberState.FAILED) errors.push(fiber.lastError)
+    }
+    return errors
+  }
+
+  private _report(stage: string, error: unknown) {
+    this._errors.set(stage, error)
+    this.ctx.logger.error(error)
   }
 
   get context(): Context {
@@ -105,8 +122,9 @@ export class Entry {
     const { disabled } = this.options
     try {
       this._verdict = isJsExpr(disabled) ? !!evaluate(ctx, disabled.__jsExpr, this.trace(['disabled'])) : !!disabled
+      this._errors.delete('disabled')
     } catch (error) {
-      this.ctx.logger.error(error)
+      this._report('disabled', error)
       this._verdict = true
     }
   }
@@ -155,12 +173,13 @@ export class Entry {
         inject[key] = interpolate(this.parent.ctx, inject[key], this.trace, ['inject', key])
       }
     } catch (error) {
-      this.ctx.logger.error(error)
+      this._report('inject', error)
       this.inject = Object.create(null)
       this._verdict = true
       return
     }
     // strict: `null` and a missing key differ
+    this._errors.delete('inject')
     const changed = !deepEqual(inject, this.inject, true)
     this.inject = inject
     return changed
@@ -169,9 +188,10 @@ export class Entry {
   private _applyIntercept(ctx: Context) {
     try {
       swap(this._intercept, interpolate(ctx, this.options.intercept, this.trace, ['intercept']))
+      this._errors.delete('intercept')
       return true
     } catch (error) {
-      this.ctx.logger.error(error)
+      this._report('intercept', error)
       // the plugin does not run with an intercept that cannot be evaluated
       this._verdict = true
       return false
@@ -200,7 +220,7 @@ export class Entry {
     }
     this._resolveDisabled(ctx)
     if (this.disabled || !this._applyIntercept(ctx)) {
-      this._dispose(this.innerFiber)
+      await this._dispose(this.innerFiber)
       return
     }
     if (diff.includes('config') || this.options.group) {
@@ -209,7 +229,7 @@ export class Entry {
   }
 
   async refresh() {
-    if (this.outerFiber || this.innerFiber) return
+    if (this.outerFiber || this.innerFiber?.uid) return
     if (this._resolveInject() === undefined) return
     if (this._blocked()) return
     await this.init()
@@ -217,6 +237,8 @@ export class Entry {
 
   async update(options: Partial<EntryOptions>, create = false, force = false) {
     const legacy = { ...this.options }
+    for (const stage of ['disabled', 'inject', 'intercept']) this._errors.delete(stage)
+    if (options.name !== undefined && options.name !== this.options.name) this._errors.delete('import')
 
     // step 1: update options
     if (create) {
@@ -229,13 +251,13 @@ export class Entry {
     // step 2: resolve inject
     const changed = this._resolveInject()
     if (changed === undefined) {
-      this.dispose()
+      await this.dispose()
       return
     }
 
     // step 3: execute
     if (this._blocked()) {
-      this.dispose()
+      await this.dispose()
       return
     }
 
@@ -257,18 +279,28 @@ export class Entry {
   }
 
   dispose() {
+    this._importRevision++
+    this._initRevision++
+    this._errors.delete('import')
+    this._errors.delete('activation')
     const fiber = this.outerFiber ?? this.innerFiber
     this.outerFiber = undefined
     return this._dispose(fiber)
   }
 
   private _dispose(fiber?: Fiber) {
-    this._disposing = true
-    try {
-      return fiber?.dispose()
-    } finally {
-      this._disposing = false
-    }
+    this._disposing++
+    const task = (async () => {
+      try {
+        await fiber?.dispose()
+      } finally {
+        this._disposing--
+      }
+    })()
+    const tree = this.parent.tree
+    tree._trackDisposal(task)
+    if (tree !== this.loader) this.loader._trackDisposal(task)
+    return task
   }
 
   getLocation(path: PropertyKey[] = []) {
@@ -309,13 +341,25 @@ export class Entry {
   }
 
   async init(disposeTask?: Promise<void>) {
-    const task = this._initTask ??= this._init(disposeTask)
+    if (!this._initTask) {
+      const revision = this._initTaskRevision = ++this._initRevision
+      this._errors.delete('activation')
+      this._initTask = this._init(disposeTask, revision).catch((error) => {
+        if (revision !== this._initRevision || !this._registered()) return
+        this._report('activation', error)
+        throw error
+      })
+    }
+    const retry = this._initTaskRevision !== this._initRevision
+    const task = this._initTask
     try {
       await task
     } finally {
       // `_init()` releases the task before creating fibers, whose apply may start another
       if (this._initTask === task) this._initTask = undefined
     }
+    // An explicit init may join an earlier request that dispose has cancelled.
+    if (retry && this._registered() && !this._blocked()) return this.init(disposeTask)
     // failures are already reported by the fiber; we only need it to settle
     Promise.resolve()
       .then(() => this.outerFiber?.await())
@@ -328,25 +372,35 @@ export class Entry {
   }
 
   async _import() {
+    const name = this.options.name
+    const revision = ++this._importRevision
     try {
-      const exports = await this.parent.tree.import(this.options.name, this.getOuterStack)
-      return { plugin: this.loader.unwrapExports(exports) }
+      const exports = await this.parent.tree.import(name, this.getOuterStack)
+      const plugin = this.loader.unwrapExports(exports)
+      if (revision !== this._importRevision || name !== this.options.name || !this._registered()) return
+      this._errors.delete('import')
+      return { plugin }
     } catch (error) {
+      if (revision !== this._importRevision || name !== this.options.name || !this._registered()) return
+      this._errors.set('import', error)
       this._reportImport(error)
     }
   }
 
-  private async _init(disposeTask?: Promise<void>): Promise<void> {
+  private async _init(disposeTask?: Promise<void>, revision = this._initRevision): Promise<void> {
     await disposeTask
+    if (revision !== this._initRevision) return
     // a later update has already rebuilt the entry
     if (this.outerFiber || this.innerFiber?.uid) return
     this._verdict = undefined
     const { name } = this.options
     const exports = await this._import()
+    if (revision !== this._initRevision) return
     // the name may change while the module is imported
     if (name !== this.options.name) return this._init()
     if (!exports || !this._registered() || this._blocked()) return
     await this._patchContext([])
+    if (revision !== this._initRevision) return
     if (name !== this.options.name) return this._init()
     if (!this._registered() || this._blocked()) return
     this._initTask = undefined

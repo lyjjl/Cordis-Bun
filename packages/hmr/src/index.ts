@@ -6,15 +6,23 @@ import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { handleError } from './error.ts'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
-import z from 'schemastery'
+import { Config as ConfigSchema } from './config.ts'
 
 declare module 'cordis' {
   interface Context {
-    hmr: Hmr
+    hmr: HmrService
   }
 }
 
 type Awaitable<T> = T | Promise<T>
+
+export interface HmrService {
+  baseDir: string
+  hostModules: Set<string>
+  config: Hmr.Config
+  getLinked(url: string): Promise<string[]>
+  reconcile(callback: () => Awaitable<Iterable<string>>): Promise<Hmr.Result>
+}
 
 // A Windows drive-letter path, e.g. `C:\app\cordis.yml` or `C:/app/cordis.yml`.
 const driveLetter = /^[A-Za-z]:[\\/]/
@@ -708,26 +716,24 @@ namespace Hmr {
 
   export interface Config {
     base?: string
+    /**
+     * Bun only. `retain` keeps the committed graph and native FAILED instances.
+     * `rollback` restores the previous whole application graph after apply
+     * fails, and awaits old activation before publishing imports again.
+     * Neither policy undoes arbitrary module-top-level or global side effects.
+     */
+    activationFailure?: 'retain' | 'rollback'
     watch: WatchConfig
   }
 
-  export const Config: z<Config> = z.object({
-    base: z.string().description('The base directory. Defaults to `ctx.baseUrl`.'),
-    watch: z.object({
-      enabled: z.boolean().default(false).description('Reload on file changes. Requires the `fs` service.'),
-      files: z.array(String).role('table').default([
-        '.',
-        '!**/node_modules',
-        '!**/.*',
-      ]).description('Files to watch, in glob patterns relative to `base`, as `filter` of `ctx.fs.watch()`.'),
-      debounce: z.natural().role('ms').default(100).description('Debounce changes before reloading, in milliseconds.'),
-    }).description('Watch'),
-  })
+  export const Config = ConfigSchema
 
   /** The running state is brought in line with the changes, as far as they can be applied. */
   export interface Result {
     settledFibers: Fiber[]
     importFailures: ImportFailure[]
+    /** Bun strict-policy failures whose previous application graph was restored. */
+    activationFailures?: ActivationFailure[]
     /**
      * The URLs of the changed host modules and native addons, which can only be
      * applied by restarting the process. They are skipped, while the other
@@ -736,13 +742,23 @@ namespace Hmr {
     skippedHostModules: string[]
   }
 
+  /** A whole-application candidate failed activation under Bun's rollback policy. */
+  export interface ActivationFailure {
+    /** The changed URLs that triggered the grouped application replacement. */
+    urls: string[]
+    /** The activation error, or an AggregateError when several activations failed. */
+    error: unknown
+  }
+
   /**
    * A new module of a unit failed to import, or does not export a plugin.
    * Nothing in the unit is applied, and its module cache is restored. The
    * other units of the transaction are not affected.
+   * Bun treats the whole application graph as one replacement group: the
+   * previous graph remains selected when any candidate import fails.
    */
   export interface ImportFailure {
-    /** the evicted modules of the unit, whose cache entries are restored */
+    /** The failed unit's URLs; Bun reports the changes that triggered its application group. */
     urls: string[]
     /** the first error raised while importing the unit */
     error: unknown

@@ -1,0 +1,58 @@
+{
+  "name": "@cordisjs/host-bun",
+  "description": "Bun application module graphs for cordis",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "typings": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "bun": "./src/index.ts",
+      "default": "./lib/index.js"
+    },
+    "./cli": {
+      "types": "./lib/cli.d.ts",
+      "bun": "./src/cli.ts",
+      "default": "./lib/cli.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src"
+  ],
+  "engines": {
+    "bun": ">=1.4.4"
+  },
+  "yakumo": {
+    "tsc": {
+      "ignore": ["@cordisjs/plugin-hmr"]
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lyjjl/Cordis-Bun.git",
+    "directory": "packages/host-bun"
+  },
+  "devDependencies": {
+    "@cordisjs/plugin-loader": "^1.0.0-rc.9",
+    "cordis": "^4.0.0-rc.12"
+  },
+  "peerDependencies": {
+    "@cordisjs/plugin-loader": "^1.0.0-rc.9",
+    "cordis": "^4.0.0-rc.12"
+  },
+  "dependencies": {
+    "@cordisjs/loader-utils": "^0.1.0",
+    "@cordisjs/plugin-fs-node": "^0.1.0",
+    "@cordisjs/plugin-group": "^1.0.0",
+    "@cordisjs/plugin-hmr": "^1.1.2",
+    "@cordisjs/plugin-include": "^1.2.0",
+    "@cordisjs/plugin-logger-console": "^1.0.0",
+    "@cordisjs/plugin-package-manager": "^0.1.0",
+    "@cordisjs/plugin-timer": "^1.1.4"
+  }
+}

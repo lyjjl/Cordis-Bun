@@ -4,8 +4,11 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
-  # Each push to `main` gets its own group, so every commit there is built and published.
+  # Each push to `main` gets its own group, so every commit there is built.
   group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
   cancel-in-progress: true
 
@@ -20,21 +23,17 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 26
-      - name: Install Corepack
-        run: npm install -g --force corepack@latest
-      - name: Enable Corepack
-        run: corepack enable
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
       - name: Install
-        run: yarn --no-immutable
+        run: bun install --frozen-lockfile
       - name: Lint
-        run: yarn lint
+        run: bun run lint
 
   build:
     runs-on: ubuntu-latest
-
-    permissions:
-      id-token: write
-      contents: read
 
     steps:
       - name: Check out
@@ -43,24 +42,33 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 26
-      - name: Install Corepack
-        run: npm install -g --force corepack@latest
-      - name: Enable Corepack
-        run: corepack enable
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
       - name: Install
-        run: yarn --no-immutable
-      - name: Build (1)
-        run: yarn build core
-      - name: Build (2)
-        run: yarn build
-      - name: Publish
-        if: >-
-          github.event_name == 'push' &&
-          contains(fromJson('["refs/heads/main"]'), github.ref)
-        run: |-
-          yarn config set npmPublishProvenance true
-          yarn config set npmRegistryServer https://registry.npmjs.org/
-          yarn yakumo publish
+        run: bun install --frozen-lockfile
+      - name: Typecheck kernel
+        run: bun run typecheck
+      - name: Build
+        run: bun run build
+      - name: Native Bun kernel smoke
+        run: bun run test:bun
+
+  bun-runtime:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+      - name: Bun-only source install and runtime
+        run: >-
+          docker run --rm
+          --mount type=bind,src="${{ github.workspace }}",dst=/source,readonly
+          --env CORDIS_BUN_ONLY_IMAGE=1
+          --entrypoint /usr/local/bin/bun
+          oven/bun:1.4.4
+          /source/packages/host-bun/tests/bun-only.ts
 
   test:
     runs-on: ${{ matrix.os }}
@@ -78,11 +86,15 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
-      - name: Install Corepack
-        run: npm install -g --force corepack@latest
-      - name: Enable Corepack
-        run: corepack enable
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
       - name: Install
-        run: yarn --no-immutable
+        run: bun install --frozen-lockfile
+      - name: Install fixture package managers
+        run: npm install -g --force corepack@latest
+      - name: Enable fixture package managers
+        run: corepack enable
       - name: Unit Test
-        run: yarn test:json
+        run: bun run test:json
