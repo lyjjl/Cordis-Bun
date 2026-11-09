@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
-import { ModuleGraph } from 'bun'
+import { ModuleGraph, plugin } from 'bun'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Context, resolveExecution } from 'cordis'
@@ -34,7 +35,7 @@ const state = {
   closeDefinition: () => {},
   nestedImport: async () => {},
 }
-const residentName = controls + '-plugin'
+const residentName = `Cordis.NativeResident${Date.now()}`
 function residentPlugin() {
   state.residentGraph = ModuleGraph.current
 }
@@ -73,6 +74,31 @@ try {
     export default function second() { state.graphs.push(Bun.ModuleGraph.current) }
   `)
   const loader = createLoader()
+  // Host namespaces already own their imports, even with an unrelated config parent.
+  const outside = await mkdtemp(join(tmpdir(), 'cordis-resident-parent-'))
+  const residentLoader = createLoader()
+  const residentRequests: string[] = []
+  let observingResidents = true
+  plugin({
+    name: 'observe-resident-parent-resolution',
+    setup(builder) {
+      builder.onResolve({ filter: /^Cordis\.NativeResident/ }, args => {
+        if (observingResidents && args.importer.startsWith(outside)) residentRequests.push(args.path)
+      })
+    },
+  })
+  try {
+    const namespace = await residentLoader.import(residentName, pathToFileURL(outside + '/').href) as { default: unknown }
+    assert.equal(namespace.default, residentPlugin)
+    const consumer = join(outside, 'consumer.ts')
+    await writeFile(consumer, `export { state } from ${JSON.stringify(controls)}\n`)
+    assert.equal((await residentLoader.import(pathToFileURL(consumer).href) as { state: unknown }).state, state)
+    assert.deepEqual(residentRequests, [])
+  } finally {
+    observingResidents = false
+    await residentLoader.dispose()
+    await rm(outside, { recursive: true, force: true })
+  }
   // A late host import must keep native CommonJS and UTF-8 semantics after
   // resident hooks are installed; copying the bytes into loader:js breaks it.
   await put('late-common.cjs', "exports.greet = name => '你好，' + name\n")

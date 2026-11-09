@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { createRequire, isBuiltin } from 'node:module'
 import { dirname, extname, isAbsolute, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -134,6 +135,17 @@ function installResidents(additions: ReadonlyMap<string, Resident>): void {
 /** Register the same object module under Bun's canonical, importer-resolved path. */
 export function registerResidentFiles(parentURL: string): void {
   if (resolvingNative) return
+  // Canonical aliases describe installed files. Bun switches to its package
+  // manager in scopes outside a node_modules tree; those scopes use resident names.
+  const parent = fileURL(parentURL)
+  if (!parent) return
+  let directory = fileURLToPath(parent)
+  if (!parent.endsWith('/')) directory = dirname(directory)
+  while (!existsSync(resolve(directory, 'node_modules'))) {
+    const ancestor = dirname(directory)
+    if (ancestor === directory) return
+    directory = ancestor
+  }
   resolvingNative = true
   try {
     runInHost(() => {

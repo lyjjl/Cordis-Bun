@@ -113,7 +113,8 @@ export class BunModuleLoader implements ModuleSource {
         const key = fileURL(specifier) ?? specifier
         let resident = this._residents.get(key)
         const url = resident ? key : resolveModule(specifier, parentURL)
-        if (url.startsWith('file:') || parentURL) registerResidentFiles(url.startsWith('file:') ? url : parentURL!)
+        // A host namespace already owns its imports and needs no importer-side aliases.
+        if (!resident && (url.startsWith('file:') || parentURL)) registerResidentFiles(url.startsWith('file:') ? url : parentURL!)
         resident ??= this._residents.get(url)
         if (resident || this._isResident(url)) {
           const namespace = resident?.namespace ?? await import(/* @vite-ignore */ url)
